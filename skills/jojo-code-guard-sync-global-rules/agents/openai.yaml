@@ -1,0 +1,6 @@
+interface:
+  display_name: "jojo-code-guard:sync-global-rules"
+  short_description: "同步 Claude 与 Codex 全局 AI 规则"
+  default_prompt: "检查两个全局规则文件的内容和差异，确认后同步 Skill 内置规则。"
+policy:
+  allow_implicit_invocation: true

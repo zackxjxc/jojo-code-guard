@@ -24,9 +24,9 @@ def _copy(source: pathlib.Path, destination: pathlib.Path, executable: bool = Fa
 def main() -> int:
     """从空目录重建 Claude manifest、命令、hook 和共享 Skill。"""
     root = pathlib.Path(__file__).resolve().parents[1]
-    source_skill = root / "skills" / "jojo-code-guard"
-    if not source_skill.is_dir():
-        raise FileNotFoundError(f"Skill 源目录不存在：{source_skill}")
+    source_skills = root / "skills"
+    if not source_skills.is_dir():
+        raise FileNotFoundError(f"Skill 源目录不存在：{source_skills}")
 
     codex_home = pathlib.Path(
         os.environ.get("CODEX_HOME", str(pathlib.Path.home() / ".codex"))
@@ -52,10 +52,10 @@ def main() -> int:
     for source in sorted(command_root.glob("*.md")):
         _copy(source, destination / "commands" / source.name)
 
-    skill_destination = destination / "skills" / "jojo-code-guard"
-    if source_skill.resolve() != skill_destination.resolve():
+    skill_destination = destination / "skills"
+    if source_skills.resolve() != skill_destination.resolve():
         shutil.copytree(
-            source_skill,
+            source_skills,
             skill_destination,
             dirs_exist_ok=True,
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
