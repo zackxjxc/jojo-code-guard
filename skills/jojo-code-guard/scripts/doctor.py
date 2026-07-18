@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
@@ -163,6 +164,227 @@ def _check_hook(findings: list[Finding], repo: Path) -> None:
             findings.append(Finding("OK", "Git hook", "pre-commit 框架", "配置和命令均存在"))
         else:
             findings.append(Finding("WARNING", "Git hook", "pre-commit 框架", "存在配置但命令未安装"))
+
+
+def _find_claude_home() -> Path:
+    """定位 Claude Code 用户目录。"""
+    return Path.home() / ".claude"
+
+
+def _check_claude_hooks(findings: list[Finding]) -> None:
+    """检查 Claude Code SessionStart hook 是否已注册。
+
+    检测顺序：~/.claude/hooks/session-start 文件、settings.json 中的 hooks 配置、已安装插件。
+    任一命中即视为已注册。
+    """
+    claude_home = _find_claude_home()
+    hooks_dir = claude_home / "hooks"
+    session_start = hooks_dir / "session-start"
+    settings_path = claude_home / "settings.json"
+
+    # 直接放在 ~/.claude/hooks/ 下的 hook 文件
+    if session_start.exists():
+        content = _read_utf8(session_start)
+        if content and "jojo-code-guard" in content:
+            findings.append(Finding("OK", "Claude", "SessionStart hook", str(session_start)))
+            return
+        else:
+            findings.append(
+                Finding(
+                    "WARNING",
+                    "Claude",
+                    "SessionStart hook",
+                    f"存在但非啾啾代码守护 hook：{session_start}",
+                )
+            )
+            return
+
+    # settings.json 中的 hooks 配置
+    if settings_path.exists():
+        settings_content = _read_utf8(settings_path)
+        if settings_content:
+            try:
+                settings = json.loads(_strip_jsonc_comments(settings_content))
+            except json.JSONDecodeError:
+                settings = None
+            if isinstance(settings, dict):
+                hooks_cfg = settings.get("hooks", {})
+                if isinstance(hooks_cfg, dict):
+                    session_start_cfgs = hooks_cfg.get("SessionStart")
+                    if session_start_cfgs:
+                        # 检查配置中是否包含 jojo-code-guard 相关命令
+                        for cfg in session_start_cfgs if isinstance(session_start_cfgs, list) else [session_start_cfgs]:
+                            cmd = ""
+                            if isinstance(cfg, dict):
+                                sub_hooks = cfg.get("hooks", [])
+                                if isinstance(sub_hooks, list) and sub_hooks:
+                                    cmd = sub_hooks[0].get("command", "") if isinstance(sub_hooks[0], dict) else ""
+                            elif isinstance(cfg, str):
+                                cmd = cfg
+                            if "jojo-code-guard" in cmd or "session-start" in cmd:
+                                findings.append(
+                                    Finding("OK", "Claude", "settings.json hooks", "SessionStart 已配置")
+                                )
+                                return
+                        # 有 SessionStart 但可能不是 jojo-code-guard
+                        findings.append(
+                            Finding("WARNING", "Claude", "settings.json hooks", "SessionStart 已配置但未识别为啾啾代码守护")
+                        )
+                        return
+
+    # 检查插件目录
+    plugins_data = claude_home / "plugins" / "data"
+    if plugins_data.exists():
+        for item in plugins_data.iterdir():
+            if item.is_dir() and "jojo-code-guard" in item.name.lower():
+                findings.append(Finding("OK", "Claude", "Plugin", f"已安装：{item.name}"))
+                return
+
+    findings.append(
+        Finding(
+            "ACTION_REQUIRED",
+            "Claude",
+            "SessionStart hook",
+            "缺失；自动加载不会生效。在 jojo-code-guard 仓库中运行 doctor.py --repair --yes 可自动安装",
+        )
+    )
+
+
+def _repair_claude_hook(repo: Path) -> str:
+    """安装 Claude Code SessionStart hook 到 ~/.claude/hooks/ 并在 settings.json 注册。
+
+    优先从当前仓库的 hooks/ 目录复制脚本；若找不到则从当前脚本所在目录查找。
+    不会覆盖已有的非 jojo-code-guard hook。
+    """
+    claude_home = _find_claude_home()
+    hooks_dir = claude_home / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+
+    # 定位 hook 源文件目录
+    source_dir = None
+    candidates = [
+        repo / "hooks" if repo else None,
+        Path(__file__).resolve().parent.parent / "hooks",  # skill 目录下的 hooks
+        Path(__file__).resolve().parent,  # scripts 目录（可能包含 hook 脚本）
+    ]
+    for candidate in candidates:
+        if candidate and (candidate / "session-start").exists():
+            source_dir = candidate
+            break
+
+    if source_dir is None:
+        raise RuntimeError(
+            "找不到 hook 源文件（session-start）。"
+            "请确保在 jojo-code-guard 仓库中运行，或手动将 hooks/ 下的文件复制到 ~/.claude/hooks/"
+        )
+
+    # 检查是否已有非 jojo-code-guard 的 hook
+    existing_session_start = hooks_dir / "session-start"
+    if existing_session_start.exists():
+        existing_content = _read_utf8(existing_session_start)
+        if existing_content and "jojo-code-guard" not in existing_content:
+            raise RuntimeError(
+                f"已有第三方 SessionStart hook：{existing_session_start}，未覆盖。请手动合并后再试"
+            )
+
+    # 复制 hook 脚本
+    copied = []
+    for name in ("session-start",):
+        src = source_dir / name
+        dst = hooks_dir / name
+        if src.exists():
+            shutil.copy2(str(src), str(dst))
+            copied.append(str(dst))
+            # Unix 可执行权限
+            if platform.system() != "Windows":
+                dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        else:
+            raise RuntimeError(f"hook 源文件缺失：{src}")
+
+    # 同时复制 run-hook.cmd（Windows 需要）
+    run_hook_src = source_dir / "run-hook.cmd"
+    if run_hook_src.exists():
+        shutil.copy2(str(run_hook_src), str(hooks_dir / "run-hook.cmd"))
+        copied.append(str(hooks_dir / "run-hook.cmd"))
+
+    # 在 settings.json 中注册 hook
+    settings_path = claude_home / "settings.json"
+    if settings_path.exists():
+        raw = settings_path.read_text(encoding="utf-8")
+        try:
+            settings_data = json.loads(raw)
+        except json.JSONDecodeError:
+            try:
+                settings_data = json.loads(_strip_jsonc_comments(raw))
+            except json.JSONDecodeError:
+                raise RuntimeError(f"无法解析 {settings_path}，请手动配置 hooks")
+        if not isinstance(settings_data, dict):
+            raise RuntimeError(f"{settings_path} 内容异常，请手动配置 hooks")
+    else:
+        settings_data = {}
+
+    # 构造 hook 命令
+    session_start_abs = hooks_dir / "session-start"
+    if platform.system() == "Windows":
+        # Windows：使用 Git Bash 运行 hook 脚本
+        hook_command = f'bash "{session_start_abs.as_posix()}"'
+    else:
+        hook_command = f'bash "{session_start_abs.as_posix()}"'
+
+    existing_hooks = settings_data.get("hooks", {})
+    if not isinstance(existing_hooks, dict):
+        existing_hooks = {}
+
+    # 检查是否已有 SessionStart 配置
+    session_start_configs = existing_hooks.get("SessionStart")
+    if session_start_configs:
+        # 已有配置，检查是否需要追加
+        if isinstance(session_start_configs, list):
+            has_jojo = any(
+                isinstance(cfg, dict)
+                and any(
+                    "jojo-code-guard" in h.get("command", "")
+                    for h in (cfg.get("hooks", []) if isinstance(cfg.get("hooks"), list) else [])
+                )
+                for cfg in session_start_configs
+            )
+            if not has_jojo:
+                # 追加 jojo-code-guard 的 hook 配置
+                session_start_configs.append(
+                    {
+                        "matcher": "startup|resume|clear|compact",
+                        "hooks": [
+                            {"type": "command", "command": hook_command, "async": False}
+                        ],
+                    }
+                )
+        elif isinstance(session_start_configs, str) and "jojo-code-guard" not in session_start_configs:
+            # 单个命令，追加
+            existing_hooks["SessionStart"] = [
+                {"matcher": "", "hooks": [{"type": "command", "command": session_start_configs}]},
+                {
+                    "matcher": "startup|resume|clear|compact",
+                    "hooks": [
+                        {"type": "command", "command": hook_command, "async": False}
+                    ],
+                },
+            ]
+    else:
+        existing_hooks["SessionStart"] = [
+            {
+                "matcher": "startup|resume|clear|compact",
+                "hooks": [
+                    {"type": "command", "command": hook_command, "async": False}
+                ],
+            }
+        ]
+
+    settings_data["hooks"] = existing_hooks
+    new_content = json.dumps(settings_data, ensure_ascii=False, indent=2)
+    settings_path.write_text(new_content + "\n", encoding="utf-8")
+    copied.append(f"{settings_path} (已更新 hooks 配置)")
+
+    return "已安装：" + ", ".join(copied)
 
 
 def _check_vscode_settings(findings: list[Finding], repo: Path) -> None:
@@ -499,6 +721,9 @@ def main(arguments: list[str] | None = None) -> int:
         _check_git(findings, repo)
         _check_repo(findings, repo)
 
+    # Claude Code hook 注册状态（无论是否在仓库中都检查）
+    _check_claude_hooks(findings)
+
     if options.repair or options.install_hook or options.install_tools:
         if not options.yes:
             findings.append(Finding("ACTION_REQUIRED", "修复", "确认", "将要写入仓库或安装工具；确认后添加 --yes"))
@@ -509,6 +734,12 @@ def main(arguments: list[str] | None = None) -> int:
                 if options.repair:
                     created = repair_repo(repo, install_hook=options.install_hook)
                     findings.append(Finding("OK", "修复", "仓库", "已创建：" + (", ".join(created) or "无需创建")))
+                    # 同时尝试安装 Claude Code SessionStart hook
+                    try:
+                        claude_result = _repair_claude_hook(repo)
+                        findings.append(Finding("OK", "修复", "Claude hook", claude_result))
+                    except (OSError, RuntimeError) as claude_error:
+                        findings.append(Finding("WARNING", "修复", "Claude hook", str(claude_error)))
                 elif options.install_hook:
                     from install_hook import install
 
@@ -528,7 +759,7 @@ def main(arguments: list[str] | None = None) -> int:
         if any(item.level in {"ACTION_REQUIRED", "WARNING"} for item in findings):
             print("\n下一步选项：")
             print("[1] 仅查看报告，不修改")
-            print("[2] 补齐缺失仓库配置：doctor.py --repair --yes")
+            print("[2] 补齐缺失仓库配置 + Claude hook：doctor.py --repair --yes")
             print("[3] 安装仓库私有 pre-commit：doctor.py --install-hook --yes")
             print("[4] 安装或更新缺失设备工具：doctor.py --install-tools --yes")
     return 1 if any(item.level == "BLOCKED" for item in findings) else 0

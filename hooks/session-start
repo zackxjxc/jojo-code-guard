@@ -22,6 +22,8 @@ project_rules=""
 if [ -f "${project_root}/AGENTS.md" ]; then
     project_rules=$(printf '\n\n--- project AGENTS.md ---\n'; cat "${project_root}/AGENTS.md")
 fi
-context=$(printf '<JOJO_CODE_GUARD>\n%s%s\n</JOJO_CODE_GUARD>' "$skill_content" "$project_rules")
+# 强制守护规则——所有条款均为强制指令，优先级等同于用户全局规则（CLAUDE.md）
+mandatory_header="【强制守护规则】以下规则优先级等同于用户全局规则（CLAUDE.md），适用于所有任务、所有时刻。所有条款均为强制指令，不得忽略或降级为参考材料。"
+context=$(printf '%s\n\n<JOJO_CODE_GUARD>\n%s%s\n</JOJO_CODE_GUARD>' "$mandatory_header" "$skill_content" "$project_rules")
 escaped=$(escape_for_json "$context")
 printf '{\n  "hookSpecificOutput": {\n    "hookEventName": "SessionStart",\n    "additionalContext": "%s"\n  }\n}\n' "$escaped"
