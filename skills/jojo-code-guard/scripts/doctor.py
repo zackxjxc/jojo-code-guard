@@ -396,7 +396,7 @@ def _template(name: str) -> bytes:
         "AGENTS.md": """# 项目代码守护规则\n\n- 现有文件保持原始编码、BOM 和换行，不自动全量转码。\n- 新增 C/C++ 文件使用 UTF-8 无 BOM + LF。\n- 新增 `.bat`、`.cmd` 文件使用 UTF-8 无 BOM + CRLF。\n- 修改前后检查 `git status --short` 和 `git diff --stat`。\n- 禁止无关格式化、批量整理和自动提交。\n- 发现整文件 diff 或疑似编码污染时立即停止并报告。\n""",
         ".editorconfig": """root = true\n\n[*]\n# 老项目不强制全局编码和换行，避免编辑器保存时改写历史文件。\ncharset = unset\nend_of_line = unset\ninsert_final_newline = unset\ntrim_trailing_whitespace = false\nindent_style = space\nindent_size = 4\n""",
         ".gitattributes": """# 老项目默认保留文件原始字节，避免 Git 自动转换换行。\n* -text\n""",
-        ".gitignore": """# 常见 C++ 构建和 IDE 输出\n/build/\n/out/\n/.vs/\n/CMakeFiles/\nCMakeCache.txt\ncompile_commands.json\n""",
+        ".gitignore": """# 常见 C++ 构建和 IDE 输出\n/build/\n/out/\n/.vs/\n/CMakeFiles/\nCMakeCache.txt\ncompile_commands.json\n\n# 仅共享项目级 VS Code 设置\n/.vscode/*\n!/.vscode/settings.json\n""",
     }
     return templates[name].encode("utf-8")
 

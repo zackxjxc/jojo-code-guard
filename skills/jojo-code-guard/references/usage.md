@@ -20,4 +20,11 @@ Codex 直接 Skill 和 Codex 插件包是两种安装形态：前者放入 `$COD
 
 `.vscode/settings.json` 只是可选的编辑器提示，不是必须提交到业务仓库的标准文件。Skill 会检查其中的编码、换行、自动编码检测、保存时格式化/代码操作、尾随空白和末尾换行设置，并报告它是否被 `.gitignore` 忽略或已纳入 Git；缺失时不会自动创建或覆盖。发布仓库自身会跟踪这个文件，业务仓库是否跟踪由团队决定。
 
+业务仓库推荐使用以下 `.gitignore` 规则，忽略其他 VS Code 私有文件但放行项目级 `settings.json`：
+
+```gitignore
+/.vscode/*
+!/.vscode/settings.json
+```
+
 测试 Skill 是否加载：用户说“天王盖地虎”时，必须回答 `Price tower shock river monster`。

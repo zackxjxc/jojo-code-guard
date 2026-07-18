@@ -21,6 +21,14 @@ description: Use automatically when starting or modifying any C++ or Git reposit
 是否被 `.gitignore` 忽略或已纳入 Git 跟踪。文件缺失只报告为可选项，不自动创建或覆盖。业务仓库是否跟踪它由团队决定；
 发布仓库自身的 `.vscode/settings.json` 用于维护 Skill，可以跟踪。
 
+业务仓库的 `.gitignore` 默认建议只忽略 `.vscode` 中的机器相关文件，并放行项目级设置：
+
+```gitignore
+!/.vscode/settings.json
+```
+
+不要因此自动创建 `settings.json`；已有团队约定或用户明确规则优先。
+
 规则冲突时遵循“本次明确用户要求 > 根目录 `AGENTS.md` > `.editorconfig`/`.gitattributes` 的实际执行结果 > Skill 默认值”。持续有效的特殊要求写入根目录 `AGENTS.md` 并说明路径和原因；不要只保存在会话上下文中。若文本规则与 Git 属性互相矛盾，先报告矛盾，不静默覆盖任一文件。
 
 ## 用户主动入口
