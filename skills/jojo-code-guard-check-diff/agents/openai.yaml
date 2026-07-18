@@ -1,0 +1,6 @@
+interface:
+  display_name: "jojo-code-guard:check-diff"
+  short_description: "检查编码、换行与 Git diff 污染"
+  default_prompt: "使用 jojo-code-guard 检查当前未提交修改，只读报告编码、换行和异常 diff。"
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,6 @@
+interface:
+  display_name: "jojo-code-guard:doctor"
+  short_description: "诊断设备、Git 与仓库保护配置"
+  default_prompt: "使用 jojo-code-guard 检查当前设备和仓库环境，默认只读并报告修复影响。"
+policy:
+  allow_implicit_invocation: true

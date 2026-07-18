@@ -35,10 +35,17 @@ git add --chmod=+x hooks/run-hook.cmd hooks/session-start
 
 新增 `.ps1` 默认采用 UTF-8 无 BOM + LF；只有明确使用 Windows PowerShell 5.1 且包含中文时，才在项目 `AGENTS.md` 中声明 UTF-8 BOM 例外。
 
+Codex 中会分别显示以下入口：
+
+- `jojo-code-guard`：日常自动守护编码、换行和最小 diff。
+- `jojo-code-guard:doctor`：按需执行设备、Git 和仓库诊断。
+- `jojo-code-guard:check-diff`：按需检查编码、换行和未提交 diff。
+- `jojo-code-guard:help`：查看功能和安全边界。
+
 主动入口示例：
 
 ```text
-Codex：使用 $jojo-code-guard 执行 doctor
+Codex：选择对应的 `jojo-code-guard` 入口，或使用 `$jojo-code-guard` 后说明要执行的功能
 Claude Code：/jojo-code-guard:doctor
 ```
 

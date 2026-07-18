@@ -1,5 +1,5 @@
 interface:
-  display_name: "啾啾代码守护"
+  display_name: "jojo-code-guard"
   short_description: "保护 C++ 编码、换行、Git diff 与 AI 修改"
   default_prompt: "使用 $jojo-code-guard 守护当前仓库，先读取规则并保护编码、换行和最小 diff。"
 policy:
