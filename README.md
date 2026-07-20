@@ -23,10 +23,10 @@ codex plugin add jojo-code-guard@jojo-code-guard
 
 安装后重新打开会话。插件管理器会从 GitHub 获取仓库，不需要用户手动 clone 或复制 Skill。Skill 不会复制到业务仓库；项目可按需提供自己的 `AGENTS.md`、`.editorconfig` 和 `.gitattributes`。
 
-首次提交本仓库时，在 Windows 工作树上也要为 Claude hook 写入 Unix 可执行位：
+首次提交本仓库时，在 Windows 工作树上也要为 Claude SessionStart 脚本写入 Unix 可执行位：
 
 ```bash
-git add --chmod=+x hooks/run-hook.cmd hooks/session-start
+git add --chmod=+x hooks/session-start
 ```
 
 否则 macOS/Linux 从 GitHub 安装后可能无法直接启动 SessionStart hook。

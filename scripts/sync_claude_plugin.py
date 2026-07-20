@@ -21,6 +21,30 @@ def _copy(source: pathlib.Path, destination: pathlib.Path, executable: bool = Fa
         destination.chmod(destination.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def _remove_obsolete_launchers(root: pathlib.Path, destination: pathlib.Path) -> None:
+    """从生成目录移除旧版 Claude hook 启动器。"""
+    if root.resolve() == destination.resolve():
+        return
+    for name in ("run-hook.cmd", "run-hook.sh"):
+        path = destination / "hooks" / name
+        if path.is_file() or path.is_symlink():
+            path.unlink()
+
+
+def _validate_adapter(destination: pathlib.Path) -> None:
+    """确认生成目录包含 Claude 自动加载所需的全部资源。"""
+    required = (
+        destination / ".claude-plugin" / "plugin.json",
+        destination / ".claude-plugin" / "marketplace.json",
+        destination / "hooks" / "hooks.json",
+        destination / "hooks" / "session-start",
+        destination / "skills" / "jojo-code-guard" / "SKILL.md",
+    )
+    missing = [str(path) for path in required if not path.is_file()]
+    if missing:
+        raise FileNotFoundError("Claude 适配包缺少资源：" + ", ".join(missing))
+
+
 def main() -> int:
     """从空目录重建 Claude manifest、命令、hook 和共享 Skill。"""
     root = pathlib.Path(__file__).resolve().parents[1]
@@ -42,7 +66,6 @@ def main() -> int:
         (root / ".claude-plugin" / "plugin.json", destination / ".claude-plugin" / "plugin.json", False),
         (root / ".claude-plugin" / "marketplace.json", destination / ".claude-plugin" / "marketplace.json", False),
         (root / "hooks" / "hooks.json", destination / "hooks" / "hooks.json", False),
-        (root / "hooks" / "run-hook.cmd", destination / "hooks" / "run-hook.cmd", True),
         (root / "hooks" / "session-start", destination / "hooks" / "session-start", True),
     ]
     for source, target, executable in files:
@@ -60,6 +83,8 @@ def main() -> int:
             dirs_exist_ok=True,
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
+    _remove_obsolete_launchers(root, destination)
+    _validate_adapter(destination)
     print(f"Synced Claude adapter: {destination}")
     return 0
 
