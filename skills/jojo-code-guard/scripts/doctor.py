@@ -115,6 +115,23 @@ def _check_git(findings: list[Finding], repo: Path) -> None:
             findings.append(Finding("OK", "Git", key, "未设置"))
     if _config(repo, "--local", "core.autocrlf").lower() != "false":
         findings.append(Finding("ACTION_REQUIRED", "Git", "core.autocrlf", "建议使用 git config --local core.autocrlf false"))
+    # Windows 上 core.filemode 必须为 false，否则 Unix 可执行权限位(100755↔100644)
+    # 差异会导致 git status 持续显示 0 行内容的 modified
+    if os.name == "nt":
+        fm = _config(repo, "--local", "core.filemode").lower()
+        scope = "local"
+        if not fm:
+            fm = _config(repo, "--global", "core.filemode").lower()
+            scope = "global"
+        if not fm:
+            fm = "true"  # git 默认值
+            scope = "默认"
+        if fm != "false":
+            findings.append(Finding("WARNING", "Git", f"{scope} core.filemode",
+                f"当前为 {fm}，Windows 上应设为 false；"
+                "否则 Unix 可执行权限位差异会令 git status 持续显示 0 行内容的 modified"))
+        else:
+            findings.append(Finding("OK", "Git", f"{scope} core.filemode", fm))
 
 
 def _read_utf8(path: Path) -> str | None:

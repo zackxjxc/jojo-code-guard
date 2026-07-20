@@ -13,7 +13,7 @@ description: Load automatically at the start of every session and apply to every
 
 无论用户任务是否涉及代码，都必须在每个新会话开始时加载本技能并遵守其安全边界；仅在涉及仓库或文件编辑时执行相应的 Git、编码和差异检查。
 
-自动守护只做轻量、只读的编辑前后保护：记录目标文件原始编码/BOM/EOL，执行 `git status --short` 和 `git diff --stat`，编辑后核对 diff 范围。不要每次编辑都重复安装软件或重写仓库配置。发现整文件变化、仅换行变化或未授权文件变化时立即停止并报告。若 Git 的 `core.autocrlf`/`core.eol` 可能改写工作区，先报告并要求修正；索引已经丢失的历史工作区换行无法由工具推测。Git hook/pre-commit 是最终门禁，但不能替代 AI 的最小改动规则。
+自动守护只做轻量、只读的编辑前后保护：记录目标文件原始编码/BOM/EOL，执行 `git status --short` 和 `git diff --stat`，编辑后核对 diff 范围。不要每次编辑都重复安装软件或重写仓库配置。发现整文件变化、仅换行变化或未授权文件变化时立即停止并报告。若 Git 的 `core.autocrlf`/`core.eol` 可能改写工作区，先报告并要求修正；索引已经丢失的历史工作区换行无法由工具推测。Windows 上 `core.filemode` 必须为 `false`，否则 Unix 可执行权限位（100755 ↔ 100644）差异会令 `git status` 持续显示 0 行内容的 modified 文件。Git hook/pre-commit 是最终门禁，但不能替代 AI 的最小改动规则。
 
 默认把所有仓库视为老项目：现有文件保真，新增文件使用 UTF-8 无 BOM；`.bat/.cmd` 使用 UTF-8 无 BOM + CRLF，并建议用 `.gitattributes` 的 `-text diff` 保留脚本字节。`.ps1` 默认按 PowerShell 7/Unix 使用 UTF-8 无 BOM + LF；若明确由 Windows PowerShell 5.1 执行且含中文，用户可自行创建项目规则文件记录 UTF-8 BOM 例外。用户明确提出的规则优先，但全局配置、批量迁移、安装软件等高影响操作必须先说明范围并确认。
 
