@@ -29,9 +29,15 @@ def _remove_obsolete_resources(root: pathlib.Path, destination: pathlib.Path) ->
         path = destination / "hooks" / name
         if path.is_file() or path.is_symlink():
             path.unlink()
+    obsolete_command = destination / "commands" / "commit.md"
+    if obsolete_command.is_file() or obsolete_command.is_symlink():
+        obsolete_command.unlink()
     old_skill = destination / "skills" / "jojo-code-guard-sync-global-rules"
     if old_skill.is_dir():
         shutil.rmtree(old_skill)
+    removed_commit_skill = destination / "skills" / "jojo-code-guard-commit"
+    if removed_commit_skill.is_dir():
+        shutil.rmtree(removed_commit_skill)
 
 
 def _validate_adapter(destination: pathlib.Path) -> None:

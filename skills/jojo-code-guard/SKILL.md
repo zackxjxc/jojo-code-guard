@@ -58,8 +58,6 @@ description: Load automatically at the start of every session and apply to every
   确认后可覆盖或合并全局规则。
 - `check-diff`：按需检查未提交修改的范围、异常膨胀和 Git 空白错误。
 - `help`：显示 `references/usage.md` 的简明说明。
-- `commit`：按测试、暂存区检查、中文提交信息和 Git 提交的顺序执行。
-
 复杂需求直接使用自然语言，例如“检查历史提交乱码”“只修复这个文件的换行”“保留该目录 CRLF”。Skill 应先说明影响，再执行明确授权的例外。
 
 ## PowerShell 与 Windows 脚本规则
