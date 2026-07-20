@@ -35,6 +35,15 @@ codex plugin list
 
 最后一条命令可确认已安装版本。已打开的 Codex 会话不会自动重启，升级后请重新打开会话。
 
+Claude Code 手动升级时，先刷新市场快照，再重新安装插件：
+
+```text
+/plugin marketplace update jojo-code-guard
+/plugin install jojo-code-guard@jojo-code-guard
+```
+
+升级后请重新打开 Claude Code 会话，使新版本生效。
+
 如需定期自动检查，可将上述命令交给 macOS 的 `launchd`、Linux 的 `systemd timer` 或 `cron` 执行。例如使用 `cron` 每天检查一次：
 
 ```cron
