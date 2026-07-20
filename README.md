@@ -23,6 +23,26 @@ codex plugin add jojo-code-guard@jojo-code-guard
 
 安装后重新打开会话。插件管理器会从 GitHub 获取仓库，不需要用户手动 clone 或复制 Skill。Skill 不会复制到业务仓库；项目可按需提供自己的 `AGENTS.md`、`.editorconfig` 和 `.gitattributes`。
 
+### 升级
+
+Codex 目前没有自动升级已安装插件的开关。手动升级时，先刷新市场快照，再重新安装插件：
+
+```bash
+codex plugin marketplace upgrade jojo-code-guard
+codex plugin add jojo-code-guard@jojo-code-guard
+codex plugin list
+```
+
+最后一条命令可确认已安装版本。已打开的 Codex 会话不会自动重启，升级后请重新打开会话。
+
+如需定期自动检查，可将上述命令交给 macOS 的 `launchd`、Linux 的 `systemd timer` 或 `cron` 执行。例如使用 `cron` 每天检查一次：
+
+```cron
+0 3 * * * /bin/sh -c 'codex plugin marketplace upgrade jojo-code-guard && codex plugin add jojo-code-guard@jojo-code-guard >> "$HOME/Library/Logs/jojo-code-guard-update.log" 2>&1'
+```
+
+自动任务不会刷新已经打开的会话；请在需要使用新版本时重新打开 Codex。执行前应确认定时任务具备访问 GitHub 和 Codex 配置目录的权限。
+
 首次提交本仓库时，在 Windows 工作树上也要为 Claude SessionStart 脚本写入 Unix 可执行位：
 
 ```bash
