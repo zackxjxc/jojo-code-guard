@@ -1,27 +1,16 @@
 #!/usr/bin/env bash
-# Claude 写入文件后立即运行字节和 diff 检查，并把结果反馈给会话。
+# 写入文件后立即运行字节和 diff 检查，并把结果反馈给会话。
 set -u
 
-if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
-    PROJECT_ROOT="$CLAUDE_PROJECT_DIR"
-else
-    PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-fi
-
-# 非 Git 目录不属于本守护范围，避免普通文件操作被无意义地阻断。
-if [ -z "$PROJECT_ROOT" ]; then
-    exit 0
-fi
-if ! PROJECT_ROOT="$(git -C "$PROJECT_ROOT" rev-parse --show-toplevel 2>/dev/null)"; then
-    exit 0
-fi
-
-if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
-    PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT//\\\\//}"
+plugin_root="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-}}}"
+if [ -n "$plugin_root" ]; then
+    PLUGIN_ROOT="$plugin_root"
 else
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
     PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 fi
+# 客户端在 Windows 可能传入反斜杠路径，先转换为 Bash 可识别的形式
+PLUGIN_ROOT="${PLUGIN_ROOT//\\\\//}"
 CHECK_SCRIPT="${PLUGIN_ROOT}/skills/jojo-code-guard/scripts/check_diff.py"
 if [ ! -r "$CHECK_SCRIPT" ]; then
     echo "jojo-code-guard: 无法读取差异检查脚本：${CHECK_SCRIPT}" >&2
@@ -40,33 +29,79 @@ else
     exit 2
 fi
 
+# 客户端事件中的 cwd 最接近本次工具调用；解析失败时再使用环境变量或进程目录。
+INPUT_CWD="$(PYTHONIOENCODING=utf-8 "${PYTHON[@]}" -c '
+import json
+import sys
+
+try:
+    value = json.load(sys.stdin).get("cwd", "")
+except (AttributeError, json.JSONDecodeError, UnicodeDecodeError):
+    value = ""
+print(value if isinstance(value, str) else "")
+' 2>/dev/null || true)"
+if [ -n "$INPUT_CWD" ]; then
+    PROJECT_ROOT="$INPUT_CWD"
+elif [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
+    PROJECT_ROOT="$CLAUDE_PROJECT_DIR"
+else
+    PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+fi
+PROJECT_ROOT="${PROJECT_ROOT//\\\\//}"
+
+# 非 Git 目录不属于本守护范围，避免普通文件操作被无意义地阻断。
+if [ -z "$PROJECT_ROOT" ]; then
+    exit 0
+fi
+if ! PROJECT_ROOT="$(git -C "$PROJECT_ROOT" rev-parse --show-toplevel 2>/dev/null)"; then
+    exit 0
+fi
+
 set +e
 OUTPUT="$("${PYTHON[@]}" "$CHECK_SCRIPT" --repo "$PROJECT_ROOT" --json 2>&1)"
 STATUS=$?
 set -e
 
 # 检查脚本返回 1 表示发现污染，属于正常诊断；返回 2 以上才表示检查本身失败。
-# PostToolUse 无法撤销已经完成的写入；结构化上下文会让 AI 停止后续步骤，最终硬门禁仍交给 pre-commit。
+# PostToolUse 无法撤销已经完成的写入；结构化上下文会让 AI 停止后续步骤；若仓库已安装 pre-commit，再由它执行最终机械检查。
 if [ "$STATUS" -ge 2 ]; then
     printf '%s\n' "$OUTPUT" >&2
-    exit "$STATUS"
+    exit 2
 fi
 
-# 正常的空结果是 []，不向会话制造噪声；警告和阻断全部反馈。
+# 正常的空结果是 []，不向会话制造噪声；缺失输出或状态矛盾时按检查失败阻断。
+if [ -z "$OUTPUT" ]; then
+    echo "jojo-code-guard: check_diff.py returned no JSON diagnostics." >&2
+    exit 2
+fi
+if [ "$OUTPUT" = "[]" ] && [ "$STATUS" -eq 1 ]; then
+    echo "jojo-code-guard: check_diff.py returned blocked status without diagnostics." >&2
+    exit 2
+fi
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "[]" ]; then
     CONTEXT="$(printf 'jojo-code-guard: AI 写入后检查结果：\n%s' "$OUTPUT")"
     CONTINUE=true
+    if [ "$STATUS" -eq 1 ]; then
+        CONTINUE=false
+    fi
     if BLOCKED_RESULT="$(
         printf '%s' "$OUTPUT" | "${PYTHON[@]}" -c '
 import json
 import sys
 
 data = json.load(sys.stdin)
+if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
+    raise ValueError("diagnostics must be a JSON array of objects")
 print("true" if any(item.get("level") == "BLOCKED" for item in data) else "false")
 ' 2>/dev/null
-    )" \
-        && [ "$BLOCKED_RESULT" = "true" ]; then
+    )"; then
+        if [ "$BLOCKED_RESULT" = "true" ]; then
+            CONTINUE=false
+        fi
+    else
         CONTINUE=false
+        CONTEXT="${CONTEXT}
+jojo-code-guard: 检查输出无法解析，已按阻断处理。"
     fi
     if ! printf '%s' "$CONTEXT" | JOJO_HOOK_CONTINUE="$CONTINUE" PYTHONIOENCODING=utf-8 "${PYTHON[@]}" -c '
 import json
@@ -84,8 +119,9 @@ if not payload["continue"]:
     payload["stopReason"] = "写入后检查发现阻断项，请先修复污染再继续"
 print(json.dumps(payload, ensure_ascii=False))
 '; then
-        printf '%s\n' "$CONTEXT"
+        echo "jojo-code-guard: failed to build structured PostToolUse output." >&2
+        exit 2
     fi
 fi
-# 发现诊断不应伪装成命令执行失败；BLOCKED 通过 continue=false 要求客户端暂停后续思考。
+# 发现诊断不伪装成命令执行失败；协议解析或输出生成失败则 fail closed。
 exit 0

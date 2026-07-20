@@ -6,8 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash --norc --noprofile -c 'script=\"${CLAUDE_PLUGIN_ROOT//\\\\\\\\//}/hooks/session-start\"; exec bash --norc --noprofile \"$script\"'",
-            "commandWindows": "bash --norc --noprofile \"%CLAUDE_PLUGIN_ROOT%/hooks/session-start\"",
+            "command": "bash --norc --noprofile \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-}}}/hooks/session-start\"",
+            "commandWindows": "bash --norc --noprofile \"%CLAUDE_PLUGIN_ROOT:\\=/%/hooks/session-start\"",
             "async": false
           }
         ]
@@ -19,8 +19,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash --norc --noprofile -c 'script=\"${CLAUDE_PLUGIN_ROOT//\\\\\\\\//}/hooks/post-write-check\"; exec bash --norc --noprofile \"$script\"'",
-            "commandWindows": "bash --norc --noprofile \"%CLAUDE_PLUGIN_ROOT%/hooks/post-write-check\"",
+            "command": "bash --norc --noprofile \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-}}}/hooks/post-write-check\"",
+            "commandWindows": "bash --norc --noprofile \"%CLAUDE_PLUGIN_ROOT:\\=/%/hooks/post-write-check\"",
             "async": false
           }
         ]

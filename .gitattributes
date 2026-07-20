@@ -1,73 +1,12 @@
-# 老项目默认保留工作区原始字节；不要让通配规则把未知二进制强制当成文本。
-* -text
-
-# 已知源码和文档仅启用 Git 文本 diff，仍禁止换行转换；未知后缀保持二进制安全。
-*.c     -text diff
-*.cc    -text diff
-*.cpp   -text diff
-*.cxx   -text diff
-*.cfg   -text diff
-*.cs    -text diff
-*.cmake -text diff
-*.h     -text diff
-*.hh    -text diff
-*.hpp   -text diff
-*.hxx   -text diff
-*.inl   -text diff
-*.ipp   -text diff
-*.ixx   -text diff
-*.m     -text diff
-*.mm    -text diff
-*.htm   -text diff
-*.ini   -text diff
-*.java  -text diff
-*.frag  -text diff
-*.glsl  -text diff
-*.hlsl  -text diff
-*.inc   -text diff
-*.log   -text diff
-*.make  -text diff
-*.patch -text diff
-*.py    -text diff
-*.ps1   -text diff
-*.sh    -text diff
-*.md    -text diff
-*.json  -text diff
-*.jsonc -text diff
-*.yaml  -text diff
-*.yml   -text diff
-*.toml  -text diff
-*.xml   -text diff
-*.html  -text diff
-*.css   -text diff
-*.js    -text diff
-*.ts    -text diff
-*.sql   -text diff
-*.props  -text diff
-*.proto  -text diff
-*.rc     -text diff
-*.rc2    -text diff
-*.rst    -text diff
-*.sln    -text diff
-*.svg    -text diff
-*.targets -text diff
-*.txt   -text diff
-*.cmake -text diff
-*.mk    -text diff
-*.tex   -text diff
-*.vcxproj -text diff
-*.vert  -text diff
-CMakeLists.txt -text diff
-Makefile       -text diff
-Dockerfile     -text diff
+* text=auto eol=lf
 
 *.bat   -text diff
 *.cmd   -text diff
-hooks/post-write-check -text diff
 .editorconfig text eol=lf
 .gitattributes text eol=lf
 .gitignore text eol=lf
 hooks/session-start text eol=lf
+hooks/post-write-check text eol=lf
 *.png   binary
 *.jpg   binary
 *.gif   binary

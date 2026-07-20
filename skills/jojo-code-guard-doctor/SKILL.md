@@ -17,10 +17,10 @@ python "<jojo-code-guard>/scripts/doctor.py" --repo .
 ```
 
 3. 报告 `OK`、`WARNING`、`ACTION_REQUIRED` 和 `BLOCKED`，包括两个用户级全局规则目标的差异状态。
-4. 不自动转码、格式化、提交、安装工具或写入仓库配置；同时报告已登记 Claude 插件的 PostToolUse 写入检查和本地 Hook 复制脚本是否过期。
+4. 默认只读，不自动转码、格式化、安装工具或写入仓库配置；同时报告已登记 Claude 插件的 SessionStart 会话注入、PostToolUse 写入检查和本地 Hook 复制脚本是否过期。
 5. 全局规则同步先用 `--sync-global-rules overwrite` 或 `--sync-global-rules merge` 预览差异。
 6. 只有用户明确确认后，才为写入操作追加 `--yes`。
-7. Claude 插件缺失或禁用时只报告安装、启用命令，不复制 hook 或改写用户设置；Codex 插件 Hook 的启用、信任和版本兼容性需在 `/hooks` 中确认。
+7. Claude 插件缺失或禁用时只报告安装、启用命令，不复制 hook 或改写用户设置；Codex 使用原生 Skill Discovery，插件生命周期 Hook 的兼容性由客户端版本决定，本 Skill 不虚构已启用状态。
 
 ## 适用场景
 

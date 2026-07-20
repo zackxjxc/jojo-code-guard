@@ -40,6 +40,9 @@ class ClaudeAdapterTests(unittest.TestCase):
             old_skill = destination / "skills" / "jojo-code-guard-sync-global-rules"
             old_skill.mkdir(parents=True)
             (old_skill / "SKILL.md").write_text("old\n", encoding="utf-8")
+            old_commit_skill = destination / "skills" / "jojo-code-guard-commit"
+            old_commit_skill.mkdir(parents=True)
+            (old_commit_skill / "SKILL.md").write_text("old commit skill\n", encoding="utf-8")
             old_commands = destination / "commands"
             old_commands.mkdir(parents=True)
             (old_commands / "commit.md").write_text("old command\n", encoding="utf-8")
@@ -51,8 +54,13 @@ class ClaudeAdapterTests(unittest.TestCase):
             self.assertFalse((hooks_dir / "run-hook.cmd").exists())
             self.assertFalse((hooks_dir / "run-hook.sh").exists())
             self.assertFalse(old_skill.exists())
+            self.assertFalse(old_commit_skill.exists())
             for relative in doctor.CLAUDE_PLUGIN_REQUIRED_FILES:
                 self.assertTrue((destination / relative).is_file(), relative)
+            self.assertEqual(
+                (destination / "hooks" / "hooks.json").read_bytes(),
+                (ROOT / "hooks" / "hooks.json").read_bytes(),
+            )
             if os.name != "nt":
                 for name in ("session-start", "post-write-check"):
                     mode = (hooks_dir / name).stat().st_mode
@@ -65,15 +73,31 @@ class ClaudeAdapterTests(unittest.TestCase):
             old_skill = destination / "skills" / "jojo-code-guard-sync-global-rules"
             old_skill.mkdir(parents=True)
             (old_skill / "SKILL.md").write_text("old\n", encoding="utf-8")
+            old_commit_skill = destination / "skills" / "jojo-code-guard-commit"
+            old_commit_skill.mkdir(parents=True)
+            (old_commit_skill / "SKILL.md").write_text("old commit skill\n", encoding="utf-8")
+            old_commands = destination / "commands"
+            old_commands.mkdir(parents=True)
+            (old_commands / "commit.md").write_text("old commit command\n", encoding="utf-8")
+            old_hooks = destination / "hooks"
+            old_hooks.mkdir(parents=True)
+            (old_hooks / "run-hook.sh").write_text("old launcher\n", encoding="utf-8")
             with mock.patch.dict(os.environ, {"JOJO_CODEX_PLUGIN_DIR": str(destination)}):
                 with contextlib.redirect_stdout(io.StringIO()):
                     result = sync_codex_plugin.main()
 
             self.assertEqual(result, 0)
             self.assertFalse(old_skill.exists())
+            self.assertFalse(old_commit_skill.exists())
             self.assertTrue((destination / "skills" / "jojo-code-guard-doctor" / "SKILL.md").is_file())
             self.assertFalse((destination / "commands" / "check-diff.md").exists())
+            self.assertFalse((destination / "commands" / "commit.md").exists())
+            self.assertFalse((destination / "hooks" / "run-hook.sh").exists())
             self.assertTrue((destination / "hooks" / "hooks.json").is_file())
+            self.assertEqual(
+                (destination / "hooks" / "hooks.json").read_bytes(),
+                (ROOT / "hooks" / "hooks.json").read_bytes(),
+            )
             self.assertTrue((destination / "hooks" / "post-write-check").is_file())
             if os.name != "nt":
                 self.assertTrue((destination / "hooks" / "post-write-check").stat().st_mode & stat.S_IXUSR)
@@ -84,12 +108,10 @@ class ClaudeAdapterTests(unittest.TestCase):
         handler = data["hooks"]["SessionStart"][0]["hooks"][0]
 
         self.assertNotIn("shell", handler)
-        self.assertEqual(
-            handler["command"],
-            "bash --norc --noprofile -c 'script=\"${CLAUDE_PLUGIN_ROOT//\\\\\\\\//}/hooks/session-start\"; "
-            "exec bash --norc --noprofile \"$script\"'",
-        )
+        self.assertIn("${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-}}}", handler["command"])
+        self.assertIn("/hooks/session-start", handler["command"])
         self.assertIn("commandWindows", handler)
+        self.assertIn("CLAUDE_PLUGIN_ROOT:\\=/%", handler["commandWindows"])
         self.assertFalse(handler["async"])
 
     def test_manifest_runs_post_write_check_for_edit_tools(self) -> None:
@@ -101,6 +123,7 @@ class ClaudeAdapterTests(unittest.TestCase):
         self.assertEqual(entries[0]["matcher"], "apply_patch|Edit|Write|MultiEdit|NotebookEdit")
         handler = entries[0]["hooks"][0]
         self.assertNotIn("shell", handler)
+        self.assertIn("${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-}}}", handler["command"])
         self.assertIn("post-write-check", handler["command"])
         self.assertIn("commandWindows", handler)
         self.assertFalse(handler["async"])
@@ -163,6 +186,33 @@ class ClaudeAdapterTests(unittest.TestCase):
             self.assertEqual(result.stdout, b"")
             self.assertEqual(result.stderr, b"")
 
+    def test_post_write_check_fails_closed_on_invalid_diagnostics(self) -> None:
+        """检查脚本输出损坏时必须返回结构化阻断，不能静默放行。"""
+        with tempfile.TemporaryDirectory(prefix="jojo invalid hook ") as directory:
+            root = Path(directory)
+            project = root / "project"
+            project.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=project, check=True)
+            fake_script = root / "skills" / "jojo-code-guard" / "scripts" / "check_diff.py"
+            fake_script.parent.mkdir(parents=True)
+            fake_script.write_text('print("{invalid")\n', encoding="utf-8")
+            environment = os.environ.copy()
+            environment["PLUGIN_ROOT"] = str(root)
+            environment["CLAUDE_PROJECT_DIR"] = str(project)
+            result = subprocess.run(
+                ["bash", str(ROOT / "hooks" / "post-write-check")],
+                cwd=project,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+        payload = json.loads(result.stdout.decode("utf-8"))
+        self.assertFalse(payload["continue"])
+        self.assertIn("无法解析", payload["hookSpecificOutput"]["additionalContext"])
+
     def test_manifest_versions_match(self) -> None:
         """Claude、Codex 和 marketplace 版本必须保持一致。"""
         claude = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
@@ -179,21 +229,108 @@ class ClaudeAdapterTests(unittest.TestCase):
         }
         self.assertEqual(len(versions), 1)
 
-    def test_codex_manifest_declares_hook_bundle(self) -> None:
-        """Codex manifest 应明确指出共享生命周期 Hook 的位置。"""
+    def test_codex_manifest_omits_unused_hook_field(self) -> None:
+        """Codex 从标准目录发现 Hook，不依赖 manifest 中未读取的 hooks 字段。"""
         data = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(data["hooks"], "./hooks/hooks.json")
+        self.assertNotIn("hooks", data)
+        self.assertFalse((ROOT / "hooks.json").exists())
+        self.assertTrue((ROOT / "hooks" / "hooks.json").is_file())
 
-    def test_attributes_do_not_force_unknown_binary_text_diff(self) -> None:
-        """通配 Git 属性不能把未知二进制强制标成文本 diff。"""
+    def test_hook_manifest_covers_session_and_write_events(self) -> None:
+        """Codex/Claude 共用的标准 Hook 清单应覆盖两个生命周期事件。"""
+        data = json.loads((ROOT / "hooks/hooks.json").read_text(encoding="utf-8"))
+        groups = data["hooks"]
+
+        self.assertIn("SessionStart", groups)
+        self.assertIn("PostToolUse", groups)
+        post_entry = groups["PostToolUse"][0]
+        self.assertEqual(post_entry["matcher"], "apply_patch|Edit|Write|MultiEdit|NotebookEdit")
+        command = post_entry["hooks"][0]["command"]
+        self.assertIn("${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-}}}", command)
+        self.assertIn("/hooks/post-write-check", command)
+
+    def test_hook_command_resolves_plugin_root_from_project_cwd(self) -> None:
+        """Codex Hook 从业务仓库 cwd 启动时也必须能找到插件脚本。"""
+        data = json.loads((ROOT / "hooks/hooks.json").read_text(encoding="utf-8"))
+        session_command = data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        post_command = data["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+
+        with tempfile.TemporaryDirectory(prefix="jojo hook cwd ") as directory:
+            project = Path(directory)
+            subprocess.run(["git", "init", "--quiet"], cwd=project, check=True)
+            subprocess.run(["git", "config", "--local", "core.autocrlf", "false"], cwd=project, check=True)
+            (project / "AGENTS.md").write_text("Codex 项目规则\n", encoding="utf-8")
+            source = project / "example.cpp"
+            source.write_bytes(b"int main() { return 0; }\n")
+            subprocess.run(["git", "add", "example.cpp"], cwd=project, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=jojo-test", "-c", "user.email=jojo@example.com", "commit", "-qm", "base"],
+                cwd=project,
+                check=True,
+            )
+            source.write_bytes(b"int main() { return 0; }\r\n")
+            environment = os.environ.copy()
+            for name in ("PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "CODEX_PLUGIN_ROOT", "CLAUDE_PROJECT_DIR"):
+                environment.pop(name, None)
+            environment["PLUGIN_ROOT"] = str(ROOT)
+            environment["CLAUDE_PLUGIN_ROOT"] = str(project / "stale-plugin-root")
+
+            session = subprocess.run(
+                ["bash", "-c", session_command],
+                cwd=project,
+                env=environment,
+                input=json.dumps({"cwd": str(project)}).encode("utf-8"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(session.returncode, 0, session.stderr.decode("utf-8", errors="replace"))
+            self.assertIn("<JOJO_CODE_GUARD>", session.stdout.decode("utf-8"))
+            self.assertIn("Codex 项目规则", session.stdout.decode("utf-8"))
+
+            post = subprocess.run(
+                ["bash", "-c", post_command],
+                cwd=ROOT,
+                env=environment,
+                input=json.dumps({"cwd": str(project)}).encode("utf-8"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(post.returncode, 0, post.stderr.decode("utf-8", errors="replace"))
+            payload = json.loads(post.stdout.decode("utf-8"))
+            self.assertFalse(payload["continue"])
+            self.assertIn("PURE_TEXT_REWRITE", payload["hookSpecificOutput"]["additionalContext"])
+
+    def test_codex_marketplace_uses_local_source_schema(self) -> None:
+        """Codex marketplace 应使用当前 CLI 可安装的本地源格式。"""
+        data = json.loads((ROOT / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8"))
+        source = data["plugins"][0]["source"]
+
+        self.assertEqual(source, {"source": "local", "path": "./"})
+
+    def test_release_repository_attributes_preserve_script_bytes(self) -> None:
+        """发布仓库应统一文本换行，同时保留批处理脚本的原始字节。"""
         lines = (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
 
-        self.assertIn("* -text", lines)
-        self.assertNotIn("* -text diff", lines)
-        self.assertIn("*.cpp   -text diff", lines)
-        self.assertIn("*.md    -text diff", lines)
-        self.assertIn("hooks/post-write-check -text diff", lines)
+        self.assertIn("* text=auto eol=lf", lines)
+        self.assertIn("*.bat   -text diff", lines)
+        self.assertIn("*.cmd   -text diff", lines)
+        self.assertIn("hooks/session-start text eol=lf", lines)
+        self.assertIn("hooks/post-write-check text eol=lf", lines)
+
+    def test_release_repository_editor_rules_remain_strict(self) -> None:
+        """发布仓库规则不应误用业务老项目的 unset/auto 模板。"""
+        editorconfig = (ROOT / ".editorconfig").read_text(encoding="utf-8")
+        settings = json.loads((ROOT / ".vscode/settings.json").read_text(encoding="utf-8"))
+
+        self.assertIn("charset                = utf-8", editorconfig)
+        self.assertIn("end_of_line            = lf", editorconfig)
+        self.assertIn("insert_final_newline   = true", editorconfig)
+        self.assertFalse(settings["files.autoGuessEncoding"])
+        self.assertEqual(settings["[bat]"]["files.eol"], "\r\n")
+        self.assertEqual(settings["[powershell]"]["files.eol"], "\n")
 
     def test_session_start_preserves_project_rules(self) -> None:
         """插件和项目路径含空格时也应原样注入项目规则。"""
@@ -221,14 +358,14 @@ class ClaudeAdapterTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
-            output = result.stdout.decode("utf-8")
-            self.assertTrue(output.startswith("【强制守护规则】"))
-            self.assertIn("name: jojo-code-guard", output)
-            self.assertIn(rules.strip(), output)
-            self.assertTrue(output.endswith("</JOJO_CODE_GUARD>\n"))
+            context = result.stdout.decode("utf-8")
+            self.assertTrue(context.startswith("【强制守护规则】"))
+            self.assertIn("name: jojo-code-guard", context)
+            self.assertIn(rules.strip(), context)
+            self.assertTrue(context.endswith("</JOJO_CODE_GUARD>\n"))
 
-    def test_session_start_fails_when_skill_is_missing(self) -> None:
-        """Skill 资源缺失时应明确失败，不能伪装成成功注入。"""
+    def test_session_start_reports_missing_skill_to_model(self) -> None:
+        """Skill 资源缺失时应向模型注入暂停要求，不能静默继续。"""
         with tempfile.TemporaryDirectory() as directory:
             environment = os.environ.copy()
             environment["CLAUDE_PLUGIN_ROOT"] = directory
@@ -250,8 +387,9 @@ class ClaudeAdapterTests(unittest.TestCase):
                 check=False,
             )
 
-            self.assertEqual(result.returncode, 1)
-            self.assertEqual(result.stdout, b"")
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("JOJO_CODE_GUARD_LOAD_FAILED", result.stdout.decode("utf-8"))
+            self.assertIn("暂停文件修改", result.stdout.decode("utf-8"))
             self.assertIn("无法读取 Skill", result.stderr.decode("utf-8"))
 
 
