@@ -9,7 +9,7 @@ else
     PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 fi
 # 将 Windows 反斜杠统一转换为正斜杠，确保 MSYS2 路径处理一致
-PLUGIN_ROOT="${PLUGIN_ROOT//\//}"
+PLUGIN_ROOT="${PLUGIN_ROOT//\\//}"
 SKILL_FILE="${PLUGIN_ROOT}/skills/jojo-code-guard/SKILL.md"
 
 if [ ! -r "$SKILL_FILE" ]; then
