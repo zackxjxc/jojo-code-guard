@@ -18,7 +18,7 @@ python "<jojo-code-guard>/scripts/check_diff.py" --repo .
 
 3. 需要时使用 `--staged-only` 只检查暂存区，使用 `--json` 输出机器可读结果。
    无 HEAD 的新仓库默认严格检查首个提交；明确导入老项目历史基线时才使用
-   `--allow-initial-baseline`。提交 Hook 默认仍严格阻断；需要一次性导入时显式设置
+   `--allow-initial-baseline`。已安装的提交 Hook 默认仍严格阻断；需要一次性导入时显式设置
    `JOJO_CODE_GUARD_ALLOW_INITIAL_BASELINE=1`。
 4. 报告编码、BOM、换行、Git 空白错误、异常膨胀和疑似格式污染。
 5. 发现问题时只提出最小修复范围，不直接格式化整个文件。

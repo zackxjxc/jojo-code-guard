@@ -1,18 +1,15 @@
 root = true
 
 [*]
-# 老项目不强制全局编码、换行或末尾换行；新增文件由守护脚本验收。
-charset                = unset
-end_of_line            = unset
-insert_final_newline   = unset
+charset                = utf-8
+end_of_line            = lf
+insert_final_newline   = true
 trim_trailing_whitespace = false
 indent_style           = space
 indent_size            = 4
 
 [*.{bat,cmd}]
-# 老脚本保留原始换行；新增脚本的 CRLF 由 check_diff.py 检查。
-end_of_line            = unset
+end_of_line            = crlf
 
 [*.ps1]
-# 老脚本保留原始换行；新增脚本的 LF 由 check_diff.py 检查。
-end_of_line            = unset
+end_of_line            = lf

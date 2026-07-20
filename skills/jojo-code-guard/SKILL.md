@@ -13,15 +13,29 @@ description: Load automatically at the start of every session and apply to every
 
 无论用户任务是否涉及代码，都必须在每个新会话开始时加载本技能并遵守其安全边界；仅在涉及仓库或文件编辑时执行相应的 Git、编码和差异检查。
 
-自动守护只做轻量、只读的编辑前后保护：记录目标文件原始编码/BOM/EOL，执行 `git status --short` 和 `git diff --stat`，编辑后核对 diff 范围。Claude 和已启用插件 Hook 的 Codex 都可在 Edit/Write/MultiEdit/NotebookEdit 后自动运行 `post-write-check`，把诊断反馈给 AI；发现 BLOCKED 时请求支持该协议的客户端暂停或替换当前工具结果。Codex 的 `apply_patch` 会匹配 Edit/Write 别名。PostToolUse 发生在写入之后，不能撤销写入，最终硬门禁仍是 Git pre-commit。通过 Bash、外部脚本或其他客户端写文件时也要手动运行检查；如果客户端未加载或未信任插件 Hook，Codex 同样回退到 AI 主动调用 `check_diff.py`。准备提交时再用 `--staged-only` 检查暂存区。不要每次编辑都重复安装软件或重写仓库配置。发现整文件变化、仅换行变化或未授权文件变化时立即停止并报告。若 Git 的 `core.autocrlf`/`core.eol` 可能改写工作区，先报告并要求修正；索引已经丢失的历史工作区换行无法由工具推测。Windows 上 `core.filemode` 必须为 `false`，否则 Unix 可执行权限位（100755 ↔ 100644）差异会令 `git status` 持续显示 0 行内容的 modified 文件。Git hook/pre-commit 是最终门禁，但不能替代 AI 的最小改动规则。
+自动守护只做轻量、只读的编辑前后保护：记录目标文件原始编码/BOM/EOL，执行 `git status --short` 和
+`git diff --stat`，编辑后核对 diff 范围。Claude 插件可在 Edit/Write/MultiEdit/NotebookEdit 后由
+PostToolUse 自动运行 `post-write-check`，把诊断反馈给 AI；发现 BLOCKED 时请求支持该协议的客户端暂停或
+替换当前工具结果。Codex 使用原生 Skill Discovery，插件生命周期 Hook 是否可用取决于客户端版本，
+不把它当作确定性前提。PostToolUse 发生在写入之后，不能撤销写入。通过 Bash、外部脚本或其他客户端
+写文件时，由 AI 在写入后自动运行检查；如果客户端未加载 Hook，AI 必须在每次写入后运行
+`check_diff.py`，再继续思考或编辑。
+
+项目初始化时若安装了 Git pre-commit，它会在 Git 提交阶段机械检查暂存区；主 Skill 只负责守护检查，
+不接管 Git 状态变更。不要每次编辑都重复安装软件或重写仓库配置。发现整文件变化、仅换行变化或未授权
+文件变化时立即停止并报告。若 Git 的 `core.autocrlf`/`core.eol` 可能改写工作区，先报告并要求修正；
+索引已经丢失的历史工作区换行无法由工具推测。Windows 上 `core.filemode` 必须为 `false`，否则 Unix
+可执行权限位（100755 ↔ 100644）差异会令 `git status` 持续显示 0 行内容的 modified 文件。
+Git hook 是可选的最终机械门禁，但不能替代 AI 的最小改动规则。
 
 ### AI 修改闭环
 
 1. 修改前读取仓库规则和 `git status --short`，确认目标文件原始编码、BOM、换行和用户已有修改。
 2. 只用最小补丁写入目标文件，不调用会批量格式化或统一换行的工具。
-3. 修改后立即确认自动 Hook 或手动运行：`python "<jojo-code-guard>/scripts/check_diff.py" --repo .`；该检查也会发现已有文件权限位或文件类型的意外变化。
-4. 发现 `BLOCKED`、整文件变化或未授权文件变化时停止，不提交，先报告并恢复本轮污染。
-5. 仅在用户明确要求创建 Git 提交时，先运行测试，再审阅并暂存目标文件和必要的 hunk，运行 `check_diff.py --staged-only`，通过后才执行 `git commit`。
+3. 修改后由自动 Hook 检查；Hook 不可用时由 AI 在每次写入后自动运行
+   `python "<jojo-code-guard>/scripts/check_diff.py" --repo .`。用户日常不需要输入命令；
+   该检查也会发现已有文件权限位或文件类型的意外变化。
+4. 发现 `BLOCKED`、整文件变化或未授权文件变化时停止后续编辑，先报告并恢复本轮污染。
 
 默认把所有仓库视为老项目：现有文件保真，新增文件使用 UTF-8 无 BOM；`.bat/.cmd` 使用 UTF-8 无 BOM + CRLF，`.gitattributes` 默认使用 `* -text`，仅对已知文本/脚本模式按需增加 `diff`。`.ps1` 默认按 PowerShell 7/Unix 使用 UTF-8 无 BOM + LF；若明确由 Windows PowerShell 5.1 执行且含中文，用户可自行创建项目规则文件记录 UTF-8 BOM 例外。用户明确提出的规则优先，但全局配置、批量迁移、安装软件等高影响操作必须先说明范围并确认。
 
@@ -91,11 +105,12 @@ jojo-code-guard 受管块。
 
 Windows 的 PowerShell 5.1 使用 `powershell.exe`，PowerShell 7 使用 `pwsh.exe`，不是同一个可执行文件；doctor 会推荐安装/更新 PowerShell 7 并让 AI 终端调用 `pwsh`，不会删除 5.1 或假装通过 PATH 顺序替换它。
 
-Claude 和当前 Codex 插件运行时都可通过插件内的 `SessionStart` hook 注入守护规则；Codex 需要启用并信任插件 Hook，
-变更 Hook 配置后需重新打开会话。若客户端版本或策略不加载插件 Hook，Codex 入口元数据仍会提高 Skill 的隐式调用命中率，
-但不等同于系统级注入，此时应把暗号和检查规则放入全局 `AGENTS.md` 或手动运行脚本。
-Codex 默认发现插件根目录的 `hooks/hooks.json`，本插件在 manifest 中显式声明该路径，
-同步脚本也会复制该目录，避免适配器生成时遗漏 Hook。
+Claude 通过插件 `hooks/hooks.json` 中的 `SessionStart` Hook 注入守护规则。当前实测的 Codex 0.142.3 也会发现该嵌套清单，
+但是否执行仍取决于客户端版本、Hook 功能、信任状态和策略，不能当作必然能力。Hook 从业务仓库的当前工作目录启动，
+Codex 注入 `PLUGIN_ROOT` 和兼容变量 `CLAUDE_PLUGIN_ROOT`，Claude 使用后者；命令通过这些变量定位插件脚本，不能依赖业务仓库中的相对路径。
+触发阶段和验收边界见 [references/生效与验收.md](references/生效与验收.md)。
+同步脚本会复制 `hooks/` 资源。
+若客户端不执行生命周期 Hook，仍回退到主 Skill 指导的检查路径。
 `sync_claude_plugin.py` 和 `sync_codex_plugin.py` 可从本目录重建两个适配包。GitHub 安装通过仓库内的 marketplace 清单完成；
 本机开发也可以继续直接使用 `~/.codex/skills/jojo-code-guard`。若客户端不支持隐式调用，直接用自然语言说
 “请使用 jojo-code-guard 检查当前仓库”即可。

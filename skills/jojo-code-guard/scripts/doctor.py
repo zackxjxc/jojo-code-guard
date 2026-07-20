@@ -158,12 +158,21 @@ def _check_editorconfig(findings: list[Finding], repo: Path) -> None:
     for line in content.splitlines():
         stripped = line.strip().lower().replace(" ", "")
         key, separator, value = stripped.partition("=")
-        if separator and key in {"charset", "end_of_line"} and value not in {"unset", "auto"}:
+        forces_encoding_or_eol = key in {"charset", "end_of_line"} and value not in {"unset", "auto"}
+        changes_on_save = key in {"insert_final_newline", "trim_trailing_whitespace"} and value == "true"
+        if separator and (forces_encoding_or_eol or changes_on_save):
             dangerous.append(line.strip())
     if dangerous:
-        findings.append(Finding("WARNING", "仓库", ".editorconfig", "包含可能改写老文件的全局编码/换行规则：" + "; ".join(dangerous)))
+        findings.append(
+            Finding(
+                "WARNING",
+                "仓库",
+                ".editorconfig",
+                "包含可能改写老文件的编码、换行或保存清理规则：" + "; ".join(dangerous),
+            )
+        )
     else:
-        findings.append(Finding("OK", "仓库", ".editorconfig", "存在且未发现全局强制编码/换行声明"))
+        findings.append(Finding("OK", "仓库", ".editorconfig", "存在且未发现强制编码、换行或保存清理声明"))
 
 
 def _check_attributes(findings: list[Finding], repo: Path) -> None:
@@ -176,12 +185,21 @@ def _check_attributes(findings: list[Finding], repo: Path) -> None:
     if content is None:
         findings.append(Finding("BLOCKED", "仓库", ".gitattributes", "不是可严格读取的 UTF-8 文件"))
         return
-    lines = [line.strip() for line in content.splitlines() if line.strip() and not line.lstrip().startswith("#")]
-    risky = [line for line in lines if any(token in line.split() for token in ("text", "text=auto", "eol=lf", "eol=crlf", "working-tree-encoding=UTF-8"))]
-    if any(line.startswith("* -text") for line in lines):
+    lines = [
+        line.strip()
+        for line in content.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    risky_tokens = ("text", "text=auto", "eol=lf", "eol=crlf", "working-tree-encoding=UTF-8")
+    risky = [line for line in lines if any(token in line.split() for token in risky_tokens)]
+    preserves_default = any(line.startswith("* -text") for line in lines)
+    if risky:
+        message = "存在可能规范化老文件的具体规则：" + "; ".join(risky[:6])
+        if preserves_default:
+            message += "；具体路径规则会覆盖 * -text 的默认值"
+        findings.append(Finding("WARNING", "仓库", ".gitattributes", message))
+    elif preserves_default:
         findings.append(Finding("OK", "仓库", ".gitattributes", "已设置 * -text，默认不会替换老文件换行"))
-    elif risky:
-        findings.append(Finding("WARNING", "仓库", ".gitattributes", "存在可能规范化老文件的规则：" + "; ".join(risky[:6])))
     else:
         findings.append(Finding("WARNING", "仓库", ".gitattributes", "存在但未声明老项目的字节保真策略"))
 
@@ -192,7 +210,14 @@ def _check_hook(findings: list[Finding], repo: Path) -> None:
     hook = Path(hooks_path) if Path(hooks_path).is_absolute() else (repo / hooks_path).resolve()
     pre_commit = hook / "pre-commit"
     if not pre_commit.exists():
-        findings.append(Finding("ACTION_REQUIRED", "Git hook", str(pre_commit), "缺少 pre-commit；可安装仓库私有守护 hook"))
+        findings.append(
+            Finding(
+                "WARNING",
+                "Git hook",
+                str(pre_commit),
+                "未安装仓库私有 pre-commit（可选；需要提交阶段机械门禁时再安装）",
+            )
+        )
     else:
         hook_content = _read_utf8(pre_commit)
         if hook_content is not None and "jojo-code-guard-managed-hook" in hook_content:
@@ -356,9 +381,32 @@ def _check_claude_hooks(findings: list[Finding]) -> None:
     else:
         findings.append(Finding("OK", "Claude", "Plugin resources", str(install_path)))
         hooks_manifest = _read_json_object(install_path / "hooks" / "hooks.json")
+        session_start = False
         post_write = False
         if hooks_manifest:
             hook_groups = hooks_manifest.get("hooks")
+            session_entries = hook_groups.get("SessionStart") if isinstance(hook_groups, dict) else None
+            if isinstance(session_entries, list):
+                for entry in session_entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    matcher = entry.get("matcher")
+                    handlers = entry.get("hooks")
+                    if (
+                        not isinstance(matcher, str)
+                        or not _matcher_covers_tools(matcher, ("startup", "resume", "clear", "compact"))
+                        or not isinstance(handlers, list)
+                    ):
+                        continue
+                    session_start = any(
+                        isinstance(handler, dict)
+                        and handler.get("type") == "command"
+                        and isinstance(handler.get("command"), str)
+                        and "session-start" in handler["command"]
+                        for handler in handlers
+                    )
+                    if session_start:
+                        break
             entries = hook_groups.get("PostToolUse") if isinstance(hook_groups, dict) else None
             if isinstance(entries, list):
                 for entry in entries:
@@ -384,6 +432,17 @@ def _check_claude_hooks(findings: list[Finding]) -> None:
                     )
                     if post_write:
                         break
+        if session_start:
+            findings.append(Finding("OK", "Claude", "SessionStart", "已配置会话开始时自动注入守护规则"))
+        else:
+            findings.append(
+                Finding(
+                    "ACTION_REQUIRED",
+                    "Claude",
+                    "SessionStart",
+                    "插件资源存在但未配置 session-start；请升级或重新安装插件",
+                )
+            )
         if post_write:
             findings.append(Finding("OK", "Claude", "PostToolUse", "已配置 Edit/Write 后自动差异检查"))
         else:
@@ -683,6 +742,7 @@ def _check_vscode_settings(findings: list[Finding], repo: Path) -> None:
         return
     findings_added = False
     eol_values = []
+    safe_eol_values = []
     encoding_values = []
     auto_guess = False
     auto_guess_seen = False
@@ -692,7 +752,10 @@ def _check_vscode_settings(findings: list[Finding], repo: Path) -> None:
     trim_trailing_whitespace = False
     for key, value in _iter_setting_values(settings):
         if key == "files.eol" and isinstance(value, str):
-            eol_values.append(value)
+            if value.lower() == "auto":
+                safe_eol_values.append(value)
+            else:
+                eol_values.append(value)
         elif key == "files.encoding" and isinstance(value, str):
             encoding_values.append(value)
         elif key == "files.autoGuessEncoding" and value is True:
@@ -719,6 +782,9 @@ def _check_vscode_settings(findings: list[Finding], repo: Path) -> None:
                 + "），老文件可能被保存为统一换行",
             )
         )
+        findings_added = True
+    if safe_eol_values:
+        findings.append(Finding("OK", "仓库", item, "files.eol=auto，会沿用已打开文件的原始换行"))
         findings_added = True
     if encoding_values:
         findings.append(
@@ -912,19 +978,22 @@ def _template(name: str) -> bytes:
 
 
 def repair_repo(repo: Path, install_hook: bool = False) -> list[str]:
-    """只创建缺失的保守配置，绝不覆盖已有文件。"""
+    """创建缺失规则文件，并校正已明确授权的仓库本地 Git 保护项。"""
     created: list[str] = []
     for name in (".editorconfig", ".gitattributes", ".gitignore"):
         path = repo / name
         if not path.exists():
             path.write_bytes(_template(name))
             created.append(name)
-    if not _config(repo, "--local", "core.autocrlf"):
+    if _config(repo, "--local", "core.autocrlf").lower() != "false":
         subprocess.run(["git", "config", "--local", "core.autocrlf", "false"], cwd=str(repo), check=True)
         created.append("git local core.autocrlf=false")
     if not _config(repo, "--local", "core.safecrlf"):
         subprocess.run(["git", "config", "--local", "core.safecrlf", "warn"], cwd=str(repo), check=True)
         created.append("git local core.safecrlf=warn")
+    if os.name == "nt" and _config(repo, "--local", "core.filemode").lower() != "false":
+        subprocess.run(["git", "config", "--local", "core.filemode", "false"], cwd=str(repo), check=True)
+        created.append("git local core.filemode=false")
     if install_hook:
         from install_hook import install
 
@@ -1064,10 +1133,31 @@ def main(arguments: list[str] | None = None) -> int:
         _tool(findings, "gsudo", ["gsudo"], ["gsudo", "--version"])
         _tool(findings, "winget", ["winget"], ["winget", "--version"])
         git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
-        if git_bash.exists() or shutil.which("bash"):
-            findings.append(Finding("OK", "设备", "Git Bash", "Claude SessionStart hook 可运行"))
+        bash = shutil.which("bash")
+        if bash:
+            code, output = _run([bash, "--norc", "--noprofile", "-c", "exit 0"])
+            message = "Claude/Codex 生命周期 Hook 可调用 Bash"
+            findings.append(
+                Finding("OK" if code == 0 else "WARNING", "设备", "Git Bash", message if code == 0 else output)
+            )
+        elif git_bash.exists():
+            findings.append(
+                Finding(
+                    "ACTION_REQUIRED",
+                    "设备",
+                    "Git Bash",
+                    f"已安装于 {git_bash}，但 bash 不在 PATH；Claude/Codex 生命周期 Hook 无法按当前命令启动",
+                )
+            )
         else:
-            findings.append(Finding("WARNING", "设备", "Git Bash", "未找到；Claude 插件仍可使用 Skill，但不会注入 SessionStart 上下文"))
+            findings.append(
+                Finding(
+                    "WARNING",
+                    "设备",
+                    "Git Bash",
+                    "未找到；主 Skill 仍可使用，但 Claude/Codex 的 Bash 生命周期 Hook 不会运行",
+                )
+            )
     if repo is None:
         findings.append(Finding("BLOCKED", "仓库", "当前目录", repo_error or "不是 Git 工作树"))
     else:
@@ -1131,7 +1221,7 @@ def main(arguments: list[str] | None = None) -> int:
             print("\n下一步选项：")
             print("[1] 仅查看报告，不修改")
             print("[2] 补齐缺失仓库配置：doctor.py --repair --yes")
-            print("[3] 安装仓库私有 pre-commit：doctor.py --install-hook --yes")
+            print("[3] 可选安装仓库私有 pre-commit：doctor.py --install-hook --yes")
             print("[4] 安装或更新缺失设备工具：doctor.py --install-tools --yes")
             print("[5] 预览覆盖全局规则：doctor.py --sync-global-rules overwrite")
             print("[6] 预览合并全局规则：doctor.py --sync-global-rules merge")

@@ -1,6 +1,6 @@
 {
   "name": "jojo-code-guard",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Protect C++ repositories from encoding, line-ending, Git diff, and AI-edit pollution.",
   "author": {
     "name": "ZACKhdn",
@@ -8,7 +8,6 @@
   },
   "homepage": "https://github.com/ZACKhdn/jojo-code-guard",
   "repository": "https://github.com/ZACKhdn/jojo-code-guard",
-  "hooks": "./hooks/hooks.json",
   "keywords": [
     "cpp",
     "encoding",
@@ -21,7 +20,7 @@
   "interface": {
     "displayName": "啾啾代码守护",
     "shortDescription": "保护 C++ 编码、换行、Git diff 与 AI 修改",
-    "longDescription": "自动保护老项目编码、BOM、换行和最小 diff，并检查设备、Git、仓库配置与提交 hook。",
+    "longDescription": "自动保护老项目编码、BOM、换行和最小 diff，并检查设备、Git、仓库配置与可选 Git 检查 hook。",
     "developerName": "啾啾代码守护",
     "category": "Developer Tools",
     "capabilities": [
