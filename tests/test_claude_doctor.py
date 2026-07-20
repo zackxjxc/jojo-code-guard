@@ -1,4 +1,4 @@
-# Claude doctor 回归测试：验证插件登记、启用状态和资源完整性。
+# 插件 doctor 回归测试：验证两端登记、启用状态、缓存版本和资源完整性。
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ sys.path.insert(0, str(SKILL_SCRIPTS))
 import doctor  # noqa: E402
 
 
-class ClaudeDoctorTests(unittest.TestCase):
-    """验证 doctor 只认可完整且精确启用的 Claude 插件。"""
+class PluginDoctorTests(unittest.TestCase):
+    """验证 doctor 只认可版本与资源完整且精确启用的客户端插件。"""
 
     def _write_json(self, path: Path, value: object) -> None:
         """写入一个 UTF-8 JSON 测试文件。"""
@@ -29,29 +29,60 @@ class ClaudeDoctorTests(unittest.TestCase):
 
     def _create_plugin(self, root: Path) -> None:
         """创建满足 doctor 最小资源要求的插件目录。"""
+        version = doctor._current_plugin_version() or "test"
         for relative in doctor.CLAUDE_PLUGIN_REQUIRED_FILES:
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             if relative == "hooks/hooks.json":
-                value = {
-                    "hooks": {
-                        "SessionStart": [
-                            {
-                                "matcher": "startup|resume|clear|compact",
-                                "hooks": [{"type": "command", "command": "session-start"}],
-                            }
-                        ],
-                        "PostToolUse": [
-                            {
-                                "matcher": "apply_patch|Edit|Write|MultiEdit|NotebookEdit",
-                                "hooks": [{"type": "command", "command": "post-write-check"}],
-                            }
-                        ]
-                    }
-                }
-                path.write_text(json.dumps(value) + "\n", encoding="utf-8")
+                source = doctor._hook_manifest_path(doctor._plugin_root(), "Claude")
+                path.write_bytes(source.read_bytes())
+            elif relative == ".claude-plugin/plugin.json":
+                self._write_json(path, {"name": "jojo-code-guard", "version": version})
             else:
                 path.write_text("{}\n" if path.suffix == ".json" else "test\n", encoding="utf-8")
+        manifest = doctor._read_json_object(root / "hooks" / "hooks.json")
+        for relative in doctor._hook_command_resources(manifest):
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                path.write_text("test\n", encoding="utf-8")
+
+    def _create_codex_plugin(self, home: Path, version: str | None = None) -> Path:
+        """在隔离的 CODEX_HOME 中创建一个完整缓存版本。"""
+        expected = doctor._current_plugin_version() or "test"
+        installed_version = version or expected
+        root = doctor._codex_cache_root(home) / installed_version
+        source_manifest = doctor._read_json_object(doctor._plugin_root() / ".codex-plugin" / "plugin.json")
+        self.assertIsNotNone(source_manifest)
+        manifest = dict(source_manifest or {})
+        manifest["version"] = installed_version
+        self._write_json(root / ".codex-plugin" / "plugin.json", manifest)
+        source_hooks = doctor._hook_manifest_path(doctor._plugin_root(), "Codex")
+        installed_hooks = doctor._hook_manifest_path(root, "Codex")
+        installed_hooks.parent.mkdir(parents=True, exist_ok=True)
+        installed_hooks.write_bytes(source_hooks.read_bytes())
+        for relative in doctor.CODEX_PLUGIN_REQUIRED_FILES:
+            path = root / relative
+            if path.exists():
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("test\n", encoding="utf-8")
+        hooks = doctor._read_json_object(installed_hooks)
+        for relative in doctor._hook_command_resources(hooks):
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                path.write_text("test\n", encoding="utf-8")
+        return root
+
+    def _check_codex(self, home: Path, feature_output: str = "hooks stable true") -> list[doctor.Finding]:
+        """在隔离的 Codex 用户目录中运行插件诊断。"""
+        findings: list[doctor.Finding] = []
+        with mock.patch.object(doctor, "_find_codex_home", return_value=home), mock.patch.object(
+            doctor.shutil, "which", return_value="codex"
+        ), mock.patch.object(doctor, "_run", return_value=(0, feature_output)):
+            doctor._check_codex_plugin(findings)
+        return findings
 
     def _check(self, home: Path) -> list[doctor.Finding]:
         """在隔离的 Claude 用户目录中运行插件诊断。"""
@@ -102,7 +133,10 @@ class ClaudeDoctorTests(unittest.TestCase):
                 {
                     "plugins": {
                         doctor.CLAUDE_PLUGIN_ID: [
-                            {"installPath": str(install_path), "version": "test"}
+                            {
+                                "installPath": str(install_path),
+                                "version": doctor._current_plugin_version() or "test",
+                            }
                         ]
                     }
                 },
@@ -113,7 +147,11 @@ class ClaudeDoctorTests(unittest.TestCase):
             self.assertTrue(any(item.item == "Plugin resources" and item.level == "OK" for item in findings))
             self.assertTrue(any(item.item == "SessionStart" and item.level == "OK" for item in findings))
             self.assertTrue(any(item.item == "PostToolUse" and item.level == "OK" for item in findings))
+            self.assertTrue(any(item.item == "Stop" and item.level == "OK" for item in findings))
+            self.assertTrue(any(item.item == "Plugin version" and item.level == "OK" for item in findings))
+            self.assertTrue(any(item.item == "Hook manifest" and item.level == "OK" for item in findings))
             self.assertTrue(any(item.item == "Plugin enabled" and item.level == "OK" for item in findings))
+            self.assertTrue(any("人工验收" in item.item and item.level == "WARNING" for item in findings))
 
     def test_disabled_plugin_requires_action(self) -> None:
         """已安装但禁用的插件必须提示用户启用。"""
@@ -177,6 +215,26 @@ class ClaudeDoctorTests(unittest.TestCase):
 
         self.assertTrue(any(item.item == "SessionStart" and item.level == "ACTION_REQUIRED" for item in findings))
 
+    def test_unrelated_stop_handler_requires_action(self) -> None:
+        """未调用守护脚本的 Stop handler 不能冒充回合结束检查。"""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".claude"
+            install_path = Path(directory) / "plugin"
+            self._create_plugin(install_path)
+            hooks_path = install_path / "hooks" / "hooks.json"
+            hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
+            hooks["hooks"]["Stop"][0]["hooks"][0]["command"] = "echo unrelated"
+            hooks_path.write_text(json.dumps(hooks) + "\n", encoding="utf-8")
+            self._write_json(home / "settings.json", {"enabledPlugins": {doctor.CLAUDE_PLUGIN_ID: True}})
+            self._write_json(
+                home / "plugins" / "installed_plugins.json",
+                {"plugins": {doctor.CLAUDE_PLUGIN_ID: [{"installPath": str(install_path)}]}},
+            )
+
+            findings = self._check(home)
+
+        self.assertTrue(any(item.item == "Stop" and item.level == "ACTION_REQUIRED" for item in findings))
+
     def test_missing_plugin_resource_is_blocked(self) -> None:
         """安装登记存在但资源不完整时必须阻断。"""
         with tempfile.TemporaryDirectory() as directory:
@@ -195,6 +253,149 @@ class ClaudeDoctorTests(unittest.TestCase):
             findings = self._check(home)
 
             self.assertTrue(any(item.item == "Plugin resources" and item.level == "BLOCKED" for item in findings))
+
+    def test_codex_config_parser_supports_generated_plugin_table(self) -> None:
+        """Python 3.9 环境不依赖 tomllib 也能读取 Codex 生成的布尔配置。"""
+        content = (
+            "[features]\n"
+            "hooks = true\n"
+            f'[plugins."{doctor.CODEX_PLUGIN_ID}"]\n'
+            "enabled = false # explicit\n"
+        )
+
+        self.assertFalse(doctor._parse_codex_plugin_enabled(content))
+        self.assertTrue(doctor._parse_codex_hooks_config(content))
+
+    def test_complete_enabled_codex_plugin_reports_manual_runtime_checks(self) -> None:
+        """Codex 静态状态通过后，信任和真实执行仍必须标为人工验收。"""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            self._create_codex_plugin(home)
+            (home / "config.toml").write_text(
+                "[features]\nhooks = true\n"
+                f'[plugins."{doctor.CODEX_PLUGIN_ID}"]\nenabled = true\n',
+                encoding="utf-8",
+            )
+
+            findings = self._check_codex(home)
+
+        self.assertTrue(any(item.item == "Plugin enabled" and item.level == "OK" for item in findings))
+        self.assertTrue(any(item.item == "Hooks feature" and item.level == "OK" for item in findings))
+        self.assertTrue(any(item.item == "Plugin version" and item.level == "OK" for item in findings))
+        self.assertTrue(any(item.item == "Hook manifest" and item.level == "OK" for item in findings))
+        manual = [item for item in findings if "人工验收" in item.item]
+        self.assertEqual(len(manual), 2)
+        self.assertTrue(all(item.level == "WARNING" for item in manual))
+
+    def test_disabled_codex_plugin_requires_action(self) -> None:
+        """缓存存在但 Codex 配置禁用插件时必须提示启用。"""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            self._create_codex_plugin(home)
+            (home / "config.toml").write_text(
+                f'[plugins."{doctor.CODEX_PLUGIN_ID}"]\nenabled = false\n',
+                encoding="utf-8",
+            )
+
+            findings = self._check_codex(home)
+
+        self.assertTrue(
+            any(item.item == "Plugin enabled" and item.level == "ACTION_REQUIRED" for item in findings)
+        )
+
+    def test_disabled_codex_hooks_feature_requires_action(self) -> None:
+        """CLI 报告的有效 Hooks 功能关闭时不能只依据 config.toml 报通过。"""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            self._create_codex_plugin(home)
+            (home / "config.toml").write_text(
+                "[features]\nhooks = true\n"
+                f'[plugins."{doctor.CODEX_PLUGIN_ID}"]\nenabled = true\n',
+                encoding="utf-8",
+            )
+
+            findings = self._check_codex(home, feature_output="hooks stable false")
+
+        self.assertTrue(
+            any(item.item == "Hooks feature" and item.level == "ACTION_REQUIRED" for item in findings)
+        )
+
+    def test_stale_codex_cache_version_requires_action(self) -> None:
+        """Codex 缓存版本落后于当前发布包时必须提示升级或重装。"""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            self._create_codex_plugin(home, version="0.0.1")
+            (home / "config.toml").write_text(
+                f'[plugins."{doctor.CODEX_PLUGIN_ID}"]\nenabled = true\n',
+                encoding="utf-8",
+            )
+
+            findings = self._check_codex(home)
+
+        self.assertTrue(
+            any(item.item == "Plugin version" and item.level == "ACTION_REQUIRED" for item in findings)
+        )
+
+    def test_stale_codex_hook_manifest_requires_action(self) -> None:
+        """版本号相同但 Hook 清单内容陈旧时也不能误报为当前版本。"""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            install_path = self._create_codex_plugin(home)
+            hooks_path = doctor._hook_manifest_path(install_path, "Codex")
+            hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
+            hooks["doctorTestStale"] = True
+            hooks_path.write_text(json.dumps(hooks) + "\n", encoding="utf-8")
+            (home / "config.toml").write_text(
+                f'[plugins."{doctor.CODEX_PLUGIN_ID}"]\nenabled = true\n',
+                encoding="utf-8",
+            )
+
+            findings = self._check_codex(home)
+
+        self.assertTrue(
+            any(item.item == "Hook manifest" and item.level == "ACTION_REQUIRED" for item in findings)
+        )
+
+    def test_multiple_codex_caches_do_not_claim_loaded_version(self) -> None:
+        """存在多个缓存时 doctor 不得把任一候选版本误报为实际加载版本。"""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            self._create_codex_plugin(home)
+            self._create_codex_plugin(home, version="0.0.1")
+            (home / "config.toml").write_text(
+                f'[plugins."{doctor.CODEX_PLUGIN_ID}"]\nenabled = true\n',
+                encoding="utf-8",
+            )
+
+            findings = self._check_codex(home)
+
+        self.assertTrue(any(item.item == "Plugin cache" and item.level == "WARNING" for item in findings))
+        self.assertFalse(any(item.item == "Plugin version" and item.level == "OK" for item in findings))
+
+    def test_codex_doctor_never_calls_plugin_list(self) -> None:
+        """只读 doctor 不得调用会刷新 marketplace snapshot 的 plugin list。"""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            self._create_codex_plugin(home)
+            (home / "config.toml").write_text(
+                f'[plugins."{doctor.CODEX_PLUGIN_ID}"]\nenabled = true\n',
+                encoding="utf-8",
+            )
+            commands: list[list[str]] = []
+
+            def run(command: list[str], cwd: Path | None = None) -> tuple[int, str]:
+                del cwd
+                commands.append(command)
+                return 0, "hooks stable true"
+
+            findings: list[doctor.Finding] = []
+            with mock.patch.object(doctor, "_find_codex_home", return_value=home), mock.patch.object(
+                doctor.shutil, "which", return_value="codex"
+            ), mock.patch.object(doctor, "_run", side_effect=run):
+                doctor._check_codex_plugin(findings)
+
+        self.assertTrue(commands)
+        self.assertFalse(any(command[1:3] == ["plugin", "list"] for command in commands))
 
 
 class RepositorySettingsTests(unittest.TestCase):

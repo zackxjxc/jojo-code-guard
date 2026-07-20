@@ -165,9 +165,10 @@ class GlobalRuleSyncTests(unittest.TestCase):
         """doctor 选择同步模式但没有 --yes 时不得调用写入函数。"""
         with mock.patch.object(doctor, "_sync_global_rules") as sync:
             with mock.patch.object(doctor, "_check_claude_hooks"):
-                with mock.patch.object(doctor, "_check_global_rules"):
-                    with contextlib.redirect_stdout(io.StringIO()):
-                        result = doctor.main(["--repo", str(ROOT), "--sync-global-rules", "merge"])
+                with mock.patch.object(doctor, "_check_codex_plugin"):
+                    with mock.patch.object(doctor, "_check_global_rules"):
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            result = doctor.main(["--repo", str(ROOT), "--sync-global-rules", "merge"])
 
         self.assertEqual(result, 0)
         sync.assert_not_called()

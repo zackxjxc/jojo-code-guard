@@ -2,6 +2,14 @@
 
 本文件记录 jojo-code-guard 的重要变更。
 
+## [0.2.5] - 2026-07-20
+
+- `PostToolUse` 改用可让 AI 继续修复的跨客户端阻断反馈，不再用 `continue: false` 直接终止处理。
+- `SessionStart` 改为结构化上下文；Python 不可用时保留两端都支持的普通 stdout 回退。
+- `PostToolUse` 增加 Bash 和 PowerShell 覆盖，并新增带重入保护的 `Stop` 回合结束兜底检查。
+- doctor 增加 Codex 插件缓存、版本、启用状态和 Hook 功能检查，并将信任与实际执行明确为人工验收项。
+- 两端同步器清理不再发布的临时设计文档，测试覆盖协议、Windows 路径、Stop 重入和同步结果。
+
 ## [0.2.4] - 2026-07-20
 
 - 移除提交专用 Skill 和 Claude/Codex 提交命令，恢复初始化后由主 Skill 和 Hook 自动守护的定位。

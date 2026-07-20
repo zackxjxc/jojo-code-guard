@@ -21,11 +21,19 @@ from pathlib import Path
 from guard_core import find_repo, run_git
 
 
-# Claude 插件的稳定标识和运行时必需资源
-CLAUDE_PLUGIN_ID = "jojo-code-guard@jojo-code-guard"
+# 插件的稳定标识和两端运行时必需资源
+PLUGIN_ID = "jojo-code-guard@jojo-code-guard"
+CLAUDE_PLUGIN_ID = PLUGIN_ID
+CODEX_PLUGIN_ID = PLUGIN_ID
 CLAUDE_PLUGIN_REQUIRED_FILES = (
     ".claude-plugin/plugin.json",
     "hooks/hooks.json",
+    "hooks/session-start",
+    "hooks/post-write-check",
+    "skills/jojo-code-guard/SKILL.md",
+)
+CODEX_PLUGIN_REQUIRED_FILES = (
+    ".codex-plugin/plugin.json",
     "hooks/session-start",
     "hooks/post-write-check",
     "skills/jojo-code-guard/SKILL.md",
@@ -55,6 +63,15 @@ class Finding:
     area: str
     item: str
     message: str
+
+
+@dataclass(frozen=True)
+class HookCapabilities:
+    """记录安装清单声明的三段自动守护能力。"""
+
+    session_start: bool
+    post_write: bool
+    stop_check: bool
 
 
 def _run(command: list[str], cwd: Path | None = None) -> tuple[int, str]:
@@ -268,6 +285,11 @@ def _find_claude_home() -> Path:
     return Path.home() / ".claude"
 
 
+def _find_codex_home() -> Path:
+    """定位 Codex 用户目录，并尊重官方 CODEX_HOME 覆盖。"""
+    return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+
+
 def _read_json_object(path: Path) -> dict[str, object] | None:
     """读取 UTF-8 JSON/JSONC 对象，格式异常时返回 None。"""
     content = _read_utf8(path)
@@ -280,8 +302,217 @@ def _read_json_object(path: Path) -> dict[str, object] | None:
     return value if isinstance(value, dict) else None
 
 
+def _plugin_root() -> Path:
+    """定位当前 doctor 随附的插件根目录。"""
+    return Path(__file__).resolve().parents[3]
+
+
+def _manifest_version(path: Path) -> str | None:
+    """读取插件 manifest 中的非空版本号。"""
+    manifest = _read_json_object(path)
+    version = manifest.get("version") if manifest else None
+    return version if isinstance(version, str) and version else None
+
+
+def _source_plugin_versions() -> dict[str, str]:
+    """读取当前发布包中可用的 Claude/Codex 版本号。"""
+    root = _plugin_root()
+    versions: dict[str, str] = {}
+    for client, relative in (
+        ("Claude", ".claude-plugin/plugin.json"),
+        ("Codex", ".codex-plugin/plugin.json"),
+    ):
+        path = root / relative
+        if path.is_file():
+            version = _manifest_version(path)
+            if version:
+                versions[client] = version
+    return versions
+
+
+def _current_plugin_version() -> str | None:
+    """返回两端一致的当前发布版本；缺失或冲突时返回 None。"""
+    versions = _source_plugin_versions()
+    root = _plugin_root()
+    invalid = (
+        (root / ".claude-plugin" / "plugin.json").is_file() and "Claude" not in versions
+    ) or ((root / ".codex-plugin" / "plugin.json").is_file() and "Codex" not in versions)
+    if invalid:
+        return None
+    unique = set(versions.values())
+    return next(iter(unique)) if len(unique) == 1 else None
+
+
+def _check_source_plugin_version(findings: list[Finding]) -> str | None:
+    """确认当前 doctor 随附的客户端 manifest 版本一致。"""
+    versions = _source_plugin_versions()
+    root = _plugin_root()
+    invalid = [
+        client
+        for client, relative in (
+            ("Claude", ".claude-plugin/plugin.json"),
+            ("Codex", ".codex-plugin/plugin.json"),
+        )
+        if (root / relative).is_file() and client not in versions
+    ]
+    if invalid:
+        findings.append(
+            Finding("BLOCKED", "插件源码", "Version", "客户端 manifest 版本缺失或无法解析：" + "、".join(invalid))
+        )
+        return None
+    if not versions:
+        findings.append(Finding("BLOCKED", "插件源码", "Version", "未找到可解析的客户端 manifest 版本"))
+        return None
+    unique = set(versions.values())
+    summary = "，".join(f"{client}={version}" for client, version in sorted(versions.items()))
+    if len(unique) != 1:
+        findings.append(Finding("BLOCKED", "插件源码", "Version", "客户端版本不一致：" + summary))
+        return None
+    version = next(iter(unique))
+    findings.append(Finding("OK", "插件源码", "Version", f"当前 doctor 随附版本 {version}（{summary}）"))
+    return version
+
+
+def _hook_manifest_path(plugin_root: Path, client: str) -> Path:
+    """按客户端 manifest 定位生命周期 Hook 清单。"""
+    manifest_name = ".claude-plugin/plugin.json" if client == "Claude" else ".codex-plugin/plugin.json"
+    manifest = _read_json_object(plugin_root / manifest_name)
+    configured = manifest.get("hooks") if manifest else None
+    if isinstance(configured, str) and configured.strip():
+        return plugin_root / configured.removeprefix("./")
+    return plugin_root / "hooks" / "hooks.json"
+
+
+def _check_hook_manifest_freshness(
+    findings: list[Finding], client: str, install_path: Path
+) -> Path | None:
+    """比较安装缓存与当前发布包的客户端 Hook 清单。"""
+    source_root = _plugin_root()
+    expected_path = _hook_manifest_path(source_root, client)
+    installed_path = _hook_manifest_path(install_path, client)
+    try:
+        expected_path.resolve().relative_to(source_root.resolve())
+        installed_path.resolve().relative_to(install_path.resolve())
+    except (OSError, ValueError):
+        findings.append(Finding("BLOCKED", client, "Hook manifest", "Hook 清单路径超出插件目录"))
+        return None
+    expected = _read_json_object(expected_path) if expected_path.is_file() else None
+    installed = _read_json_object(installed_path) if installed_path.is_file() else None
+    if expected is None:
+        findings.append(
+            Finding("BLOCKED", client, "Hook manifest", f"当前发布清单缺失或无法解析：{expected_path}")
+        )
+        return None
+    if installed is None:
+        findings.append(
+            Finding("BLOCKED", client, "Hook manifest", f"安装清单缺失或无法解析：{installed_path}")
+        )
+        return None
+    if installed != expected:
+        findings.append(
+            Finding(
+                "ACTION_REQUIRED",
+                client,
+                "Hook manifest",
+                f"安装清单不是当前 doctor 随附版本：{installed_path}；请升级或重新安装插件",
+            )
+        )
+    else:
+        findings.append(
+            Finding("OK", client, "Hook manifest", f"与当前 doctor 随附清单一致：{installed_path}")
+        )
+    return installed_path
+
+
+def _check_installed_plugin_version(
+    findings: list[Finding],
+    client: str,
+    install_path: Path,
+    manifest_relative: str,
+    expected_version: str | None,
+    registered_version: str | None = None,
+    cache_version: str | None = None,
+) -> str | None:
+    """核对登记、缓存目录、安装 manifest 与当前发布版本。"""
+    installed_version = _manifest_version(install_path / manifest_relative)
+    if installed_version is None:
+        findings.append(
+            Finding("BLOCKED", client, "Plugin version", f"安装 manifest 缺少有效版本：{install_path / manifest_relative}")
+        )
+        return None
+    inconsistent: list[str] = []
+    if registered_version and registered_version != installed_version:
+        inconsistent.append(f"登记={registered_version}")
+    if cache_version and cache_version != "local" and cache_version != installed_version:
+        inconsistent.append(f"缓存目录={cache_version}")
+    if inconsistent:
+        findings.append(
+            Finding(
+                "BLOCKED",
+                client,
+                "Plugin version",
+                f"安装 manifest={installed_version}，但" + "、".join(inconsistent),
+            )
+        )
+        return installed_version
+    if expected_version and installed_version != expected_version:
+        findings.append(
+            Finding(
+                "ACTION_REQUIRED",
+                client,
+                "Plugin version",
+                f"已安装 {installed_version}，当前 doctor 随附 {expected_version}；请升级或重新安装插件",
+            )
+        )
+    elif expected_version:
+        findings.append(Finding("OK", client, "Plugin version", installed_version))
+    else:
+        findings.append(
+            Finding("WARNING", client, "Plugin version", f"已安装 {installed_version}，但无法确定当前发布版本")
+        )
+    return installed_version
+
+
+def _parse_codex_plugin_enabled(content: str) -> bool | None:
+    """解析 Codex 生成的精确插件表，不依赖 Python 3.11 的 tomllib。"""
+    section = re.compile(
+        r'^\s*\[\s*plugins\s*\.\s*["\']'
+        + re.escape(CODEX_PLUGIN_ID)
+        + r'["\']\s*\]\s*(?:#.*)?$'
+    )
+    table = re.compile(r"^\s*\[[^]]+\]\s*(?:#.*)?$")
+    enabled = re.compile(r"^\s*enabled\s*=\s*(true|false)\s*(?:#.*)?$", re.IGNORECASE)
+    in_plugin = False
+    for line in content.splitlines():
+        if table.fullmatch(line):
+            in_plugin = section.fullmatch(line) is not None
+            continue
+        if in_plugin:
+            match = enabled.fullmatch(line)
+            if match:
+                return match.group(1).lower() == "true"
+    return None
+
+
+def _parse_codex_hooks_config(content: str) -> bool | None:
+    """读取用户配置中的显式 features.hooks 备用值。"""
+    table = re.compile(r"^\s*\[[^]]+\]\s*(?:#.*)?$")
+    features = re.compile(r"^\s*\[\s*features\s*\]\s*(?:#.*)?$", re.IGNORECASE)
+    hooks = re.compile(r"^\s*hooks\s*=\s*(true|false)\s*(?:#.*)?$", re.IGNORECASE)
+    in_features = False
+    for line in content.splitlines():
+        if table.fullmatch(line):
+            in_features = features.fullmatch(line) is not None
+            continue
+        if in_features:
+            match = hooks.fullmatch(line)
+            if match:
+                return match.group(1).lower() == "true"
+    return None
+
+
 def _iter_hook_commands(value: object):
-    """递归枚举 Claude 设置中的 command hook 命令。"""
+    """递归枚举 Hook 配置中的 command 命令。"""
     if isinstance(value, dict):
         command = value.get("command")
         if value.get("type") == "command" and isinstance(command, str):
@@ -293,6 +524,188 @@ def _iter_hook_commands(value: object):
             yield from _iter_hook_commands(child)
 
 
+def _hook_command_resources(manifest: dict[str, object] | None) -> set[str]:
+    """从 Hook 命令提取插件内被调用的脚本相对路径。"""
+    resources: set[str] = set()
+    if not manifest:
+        return resources
+    for command in _iter_hook_commands(manifest.get("hooks")):
+        normalized = command.replace("\\", "/")
+        for name in re.findall(r"/hooks/([A-Za-z0-9._-]+)", normalized):
+            resources.add("hooks/" + name)
+    return resources
+
+
+def _handler_runs_stop_check(handler: object) -> bool:
+    """确认 Stop handler 会以正确事件调用回合结束检查。"""
+    if not isinstance(handler, dict) or handler.get("type") != "command":
+        return False
+    command = handler.get("command")
+    if not isinstance(command, str):
+        return False
+    return "stop-check" in command or "post-write-check" in command
+
+
+def _add_manual_hook_findings(findings: list[Finding], client: str) -> None:
+    """明确区分静态配置与只能在客户端内完成的验收。"""
+    if client == "Codex":
+        trust = "请在当前 Codex 会话使用 /hooks 审阅并信任当前 Hook 精确哈希；doctor 不读取内部信任存储"
+    else:
+        trust = "请在 Claude 的 /hooks 中确认插件 Hook 已加载且允许执行；doctor 不把安装登记等同于运行时信任"
+    findings.append(Finding("WARNING", client, "Hook trust（人工验收）", trust))
+    findings.append(
+        Finding(
+            "WARNING",
+            client,
+            "Hook execution（人工验收）",
+            "请在真实会话分别触发 SessionStart、文件写入和 Stop；静态文件存在不能证明生命周期事件实际执行",
+        )
+    )
+
+
+def _check_codex_hook_feature(findings: list[Finding], config_content: str | None) -> None:
+    """优先读取 Codex CLI 报告的 Hooks 有效功能状态。"""
+    executable = shutil.which("codex")
+    if executable:
+        code, output = _run([executable, "features", "list"])
+        if code == 0:
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+            match = re.search(r"(?m)^\s*hooks\s+\S+\s+(true|false)\s*$", plain, re.IGNORECASE)
+            if match:
+                enabled = match.group(1).lower() == "true"
+                level = "OK" if enabled else "ACTION_REQUIRED"
+                message = "有效状态为 true" if enabled else "有效状态为 false；生命周期 Hook 不会运行"
+                findings.append(Finding(level, "Codex", "Hooks feature", message))
+                return
+            failure = "codex features list 输出中没有 hooks 有效状态"
+        else:
+            failure = "codex features list 执行失败" + (f"：{output}" if output else "")
+    else:
+        failure = "PATH 中未找到 Codex CLI"
+
+    configured = _parse_codex_hooks_config(config_content) if config_content is not None else None
+    suffix = ""
+    if configured is not None:
+        suffix = f"；用户配置 features.hooks={'true' if configured else 'false'}，但这不代表最终有效状态"
+    findings.append(Finding("WARNING", "Codex", "Hooks feature", failure + suffix + "；需要在 Codex 内人工确认"))
+
+
+def _codex_cache_root(codex_home: Path) -> Path:
+    """按官方缓存布局定位当前插件的 Codex 版本目录。"""
+    plugin_name, marketplace = CODEX_PLUGIN_ID.rsplit("@", 1)
+    return codex_home / "plugins" / "cache" / marketplace / plugin_name
+
+
+def _check_codex_plugin(findings: list[Finding], expected_version: str | None = None) -> None:
+    """只读检查 Codex 插件启用状态、缓存版本和 Hook 资源。"""
+    codex_home = _find_codex_home()
+    config_path = codex_home / "config.toml"
+    config_content = _read_utf8(config_path) if config_path.exists() else None
+    if config_path.exists() and config_content is None:
+        findings.append(Finding("WARNING", "Codex", "config.toml", f"无法按 UTF-8 读取：{config_path}"))
+    enabled = _parse_codex_plugin_enabled(config_content) if config_content is not None else None
+    if enabled is True:
+        findings.append(Finding("OK", "Codex", "Plugin enabled", CODEX_PLUGIN_ID))
+    elif enabled is False:
+        findings.append(Finding("ACTION_REQUIRED", "Codex", "Plugin enabled", "插件缓存可能存在，但配置中已禁用"))
+    else:
+        findings.append(
+            Finding("ACTION_REQUIRED", "Codex", "Plugin enabled", "config.toml 未明确记录精确插件 ID 的启用状态")
+        )
+
+    _check_codex_hook_feature(findings, config_content)
+    cache_root = _codex_cache_root(codex_home)
+    try:
+        installations = sorted(
+            (path for path in cache_root.iterdir() if path.is_dir()),
+            key=lambda path: path.name,
+        ) if cache_root.is_dir() else []
+    except OSError as error:
+        findings.append(Finding("BLOCKED", "Codex", "Plugin cache", f"无法读取 {cache_root}：{error}"))
+        return
+    if not installations:
+        level = "BLOCKED" if enabled is True else "ACTION_REQUIRED"
+        findings.append(Finding(level, "Codex", "Plugin cache", f"未找到安装缓存：{cache_root}"))
+        return
+
+    valid: list[tuple[Path, str]] = []
+    invalid: list[str] = []
+    for install_path in installations:
+        version = _manifest_version(install_path / ".codex-plugin" / "plugin.json")
+        if version:
+            valid.append((install_path, version))
+        else:
+            invalid.append(str(install_path))
+    if invalid:
+        findings.append(
+            Finding("BLOCKED", "Codex", "Plugin cache", "缓存 manifest 缺失或版本无效：" + "，".join(invalid))
+        )
+    if not valid:
+        return
+
+    versions = sorted({version for _, version in valid})
+    matching = [entry for entry in valid if expected_version and entry[1] == expected_version]
+    selected: tuple[Path, str] | None
+    if len(valid) > 1:
+        selected = None
+    elif len(matching) == 1:
+        selected = matching[0]
+    elif len(valid) == 1:
+        selected = valid[0]
+    else:
+        selected = None
+    if len(valid) > 1:
+        findings.append(
+            Finding(
+                "WARNING",
+                "Codex",
+                "Plugin cache",
+                "发现多个缓存版本：" + "、".join(versions) + "；实际加载版本需在客户端内人工确认",
+            )
+        )
+    else:
+        findings.append(Finding("OK", "Codex", "Plugin cache", str(valid[0][0])))
+    if selected is None:
+        findings.append(
+            Finding("WARNING", "Codex", "Plugin version", "无法仅凭缓存目录确定当前加载版本，请在客户端内人工确认")
+        )
+        _add_manual_hook_findings(findings, "Codex")
+        return
+
+    install_path, _ = selected
+    _check_installed_plugin_version(
+        findings,
+        "Codex",
+        install_path,
+        ".codex-plugin/plugin.json",
+        expected_version if expected_version is not None else _current_plugin_version(),
+        cache_version=install_path.name,
+    )
+    hook_path = _hook_manifest_path(install_path, "Codex")
+    required = set(CODEX_PLUGIN_REQUIRED_FILES)
+    try:
+        relative_hook_path = hook_path.resolve().relative_to(install_path.resolve())
+        required.add(relative_hook_path.as_posix())
+    except (OSError, ValueError):
+        findings.append(Finding("BLOCKED", "Codex", "Plugin resources", f"Hook 清单超出插件目录：{hook_path}"))
+        _add_manual_hook_findings(findings, "Codex")
+        return
+    hook_path = _check_hook_manifest_freshness(findings, "Codex", install_path)
+    manifest = _read_json_object(hook_path) if hook_path else None
+    required.update(_hook_command_resources(manifest))
+    missing = sorted(name for name in required if not (install_path / name).is_file())
+    if missing:
+        findings.append(Finding("BLOCKED", "Codex", "Plugin resources", "安装目录缺少资源：" + ", ".join(missing)))
+    else:
+        findings.append(Finding("OK", "Codex", "Plugin resources", str(install_path)))
+        capabilities = _hook_capabilities(
+            manifest,
+            ("apply_patch", "Edit", "Write", "Bash"),
+        )
+        _add_hook_capability_findings(findings, "Codex", capabilities)
+    _add_manual_hook_findings(findings, "Codex")
+
+
 def _matcher_covers_tools(matcher: str, tools: tuple[str, ...]) -> bool:
     """判断 Claude matcher 是否覆盖全部文件写入工具。"""
     if matcher.strip() == "*":
@@ -301,6 +714,100 @@ def _matcher_covers_tools(matcher: str, tools: tuple[str, ...]) -> bool:
         return all(re.fullmatch(matcher, tool) is not None for tool in tools)
     except re.error:
         return False
+
+
+def _hook_capabilities(
+    manifest: dict[str, object] | None,
+    post_tools: tuple[str, ...],
+) -> HookCapabilities:
+    """解析客户端所需的 SessionStart、PostToolUse 和 Stop 声明。"""
+    hook_groups = manifest.get("hooks") if manifest else None
+    if not isinstance(hook_groups, dict):
+        return HookCapabilities(False, False, False)
+
+    session_start = False
+    session_entries = hook_groups.get("SessionStart")
+    if isinstance(session_entries, list):
+        for entry in session_entries:
+            matcher = entry.get("matcher") if isinstance(entry, dict) else None
+            handlers = entry.get("hooks") if isinstance(entry, dict) else None
+            if (
+                isinstance(matcher, str)
+                and _matcher_covers_tools(matcher, ("startup", "resume", "clear", "compact"))
+                and isinstance(handlers, list)
+            ):
+                session_start = any(
+                    isinstance(handler, dict)
+                    and handler.get("type") == "command"
+                    and isinstance(handler.get("command"), str)
+                    and "session-start" in handler["command"]
+                    for handler in handlers
+                )
+                if session_start:
+                    break
+
+    post_write = False
+    post_entries = hook_groups.get("PostToolUse")
+    if isinstance(post_entries, list):
+        for entry in post_entries:
+            matcher = entry.get("matcher") if isinstance(entry, dict) else None
+            handlers = entry.get("hooks") if isinstance(entry, dict) else None
+            if (
+                isinstance(matcher, str)
+                and _matcher_covers_tools(matcher, post_tools)
+                and isinstance(handlers, list)
+            ):
+                post_write = any(
+                    isinstance(handler, dict)
+                    and handler.get("type") == "command"
+                    and isinstance(handler.get("command"), str)
+                    and "post-write-check" in handler["command"]
+                    for handler in handlers
+                )
+                if post_write:
+                    break
+
+    stop_check = False
+    stop_entries = hook_groups.get("Stop")
+    if isinstance(stop_entries, list):
+        for entry in stop_entries:
+            handlers = entry.get("hooks") if isinstance(entry, dict) else None
+            if isinstance(handlers, list) and any(_handler_runs_stop_check(handler) for handler in handlers):
+                stop_check = True
+                break
+    return HookCapabilities(session_start, post_write, stop_check)
+
+
+def _add_hook_capability_findings(
+    findings: list[Finding],
+    client: str,
+    capabilities: HookCapabilities,
+) -> None:
+    """分别报告三段清单能力，不把静态声明等同于实际执行。"""
+    states = (
+        (
+            "SessionStart",
+            capabilities.session_start,
+            "安装清单已声明会话开始 Hook",
+            "插件资源存在但未配置 session-start；请升级或重新安装插件",
+        ),
+        (
+            "PostToolUse",
+            capabilities.post_write,
+            "安装清单已覆盖编辑和 shell 写入工具",
+            "插件资源存在但未配置 post-write-check；请升级或重新安装插件",
+        ),
+        (
+            "Stop",
+            capabilities.stop_check,
+            "安装清单已声明回合结束兜底检查",
+            "插件资源存在但未正确配置 Stop 检查；请升级或重新安装插件",
+        ),
+    )
+    for item, enabled, ok_message, missing_message in states:
+        findings.append(
+            Finding("OK" if enabled else "ACTION_REQUIRED", client, item, ok_message if enabled else missing_message)
+        )
 
 
 def _check_legacy_claude_hooks(
@@ -332,7 +839,7 @@ def _check_legacy_claude_hooks(
             )
 
 
-def _check_claude_hooks(findings: list[Finding]) -> None:
+def _check_claude_hooks(findings: list[Finding], expected_version: str | None = None) -> None:
     """精确检查 Claude 插件的登记、启用状态和自动加载资源。"""
     claude_home = _find_claude_home()
     settings_path = claude_home / "settings.json"
@@ -373,87 +880,32 @@ def _check_claude_hooks(findings: list[Finding]) -> None:
         return
 
     install_path = Path(install_value).expanduser()
-    missing = [name for name in CLAUDE_PLUGIN_REQUIRED_FILES if not (install_path / name).is_file()]
+    registered_value = record.get("version") if isinstance(record, dict) else None
+    registered_version = registered_value if isinstance(registered_value, str) and registered_value else None
+    _check_installed_plugin_version(
+        findings,
+        "Claude",
+        install_path,
+        ".claude-plugin/plugin.json",
+        expected_version if expected_version is not None else _current_plugin_version(),
+        registered_version=registered_version,
+    )
+    hooks_path = _check_hook_manifest_freshness(findings, "Claude", install_path)
+    hooks_manifest = _read_json_object(hooks_path) if hooks_path else None
+    required = set(CLAUDE_PLUGIN_REQUIRED_FILES)
+    required.update(_hook_command_resources(hooks_manifest))
+    missing = sorted(name for name in required if not (install_path / name).is_file())
     if missing:
         findings.append(
             Finding("BLOCKED", "Claude", "Plugin resources", "安装目录缺少资源：" + ", ".join(missing))
         )
     else:
         findings.append(Finding("OK", "Claude", "Plugin resources", str(install_path)))
-        hooks_manifest = _read_json_object(install_path / "hooks" / "hooks.json")
-        session_start = False
-        post_write = False
-        if hooks_manifest:
-            hook_groups = hooks_manifest.get("hooks")
-            session_entries = hook_groups.get("SessionStart") if isinstance(hook_groups, dict) else None
-            if isinstance(session_entries, list):
-                for entry in session_entries:
-                    if not isinstance(entry, dict):
-                        continue
-                    matcher = entry.get("matcher")
-                    handlers = entry.get("hooks")
-                    if (
-                        not isinstance(matcher, str)
-                        or not _matcher_covers_tools(matcher, ("startup", "resume", "clear", "compact"))
-                        or not isinstance(handlers, list)
-                    ):
-                        continue
-                    session_start = any(
-                        isinstance(handler, dict)
-                        and handler.get("type") == "command"
-                        and isinstance(handler.get("command"), str)
-                        and "session-start" in handler["command"]
-                        for handler in handlers
-                    )
-                    if session_start:
-                        break
-            entries = hook_groups.get("PostToolUse") if isinstance(hook_groups, dict) else None
-            if isinstance(entries, list):
-                for entry in entries:
-                    if not isinstance(entry, dict):
-                        continue
-                    matcher = entry.get("matcher")
-                    handlers = entry.get("hooks")
-                    if (
-                        not isinstance(matcher, str)
-                        or not _matcher_covers_tools(
-                            matcher,
-                            ("apply_patch", "Edit", "Write", "MultiEdit", "NotebookEdit"),
-                        )
-                        or not isinstance(handlers, list)
-                    ):
-                        continue
-                    post_write = any(
-                        isinstance(handler, dict)
-                        and handler.get("type") == "command"
-                        and isinstance(handler.get("command"), str)
-                        and "post-write-check" in handler["command"]
-                        for handler in handlers
-                    )
-                    if post_write:
-                        break
-        if session_start:
-            findings.append(Finding("OK", "Claude", "SessionStart", "已配置会话开始时自动注入守护规则"))
-        else:
-            findings.append(
-                Finding(
-                    "ACTION_REQUIRED",
-                    "Claude",
-                    "SessionStart",
-                    "插件资源存在但未配置 session-start；请升级或重新安装插件",
-                )
-            )
-        if post_write:
-            findings.append(Finding("OK", "Claude", "PostToolUse", "已配置 Edit/Write 后自动差异检查"))
-        else:
-            findings.append(
-                Finding(
-                    "ACTION_REQUIRED",
-                    "Claude",
-                    "PostToolUse",
-                    "插件资源存在但未配置 post-write-check；请升级或重新安装插件",
-                )
-            )
+        capabilities = _hook_capabilities(
+            hooks_manifest,
+            ("Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "PowerShell"),
+        )
+        _add_hook_capability_findings(findings, "Claude", capabilities)
 
     if enabled is True:
         findings.append(Finding("OK", "Claude", "Plugin enabled", CLAUDE_PLUGIN_ID))
@@ -463,6 +915,7 @@ def _check_claude_hooks(findings: list[Finding]) -> None:
         findings.append(
             Finding("WARNING", "Claude", "Plugin enabled", "已安装，但 settings.json 未明确记录启用状态")
         )
+    _add_manual_hook_findings(findings, "Claude")
     _check_legacy_claude_hooks(findings, claude_home, settings)
 
 
@@ -1164,8 +1617,10 @@ def main(arguments: list[str] | None = None) -> int:
         _check_git(findings, repo)
         _check_repo(findings, repo)
 
-    # Claude Code hook 注册状态（无论是否在仓库中都检查）
-    _check_claude_hooks(findings)
+    # 两端插件状态无论是否在仓库中都只读检查
+    expected_version = _check_source_plugin_version(findings)
+    _check_claude_hooks(findings, expected_version=expected_version)
+    _check_codex_plugin(findings, expected_version=expected_version)
     _check_global_rules(findings, mode=options.sync_global_rules)
 
     has_action = options.repair or options.install_hook or options.install_tools or options.sync_global_rules

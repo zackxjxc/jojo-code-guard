@@ -21,7 +21,7 @@ codex plugin add jojo-code-guard@jojo-code-guard
 /plugin install jojo-code-guard@jojo-code-guard
 ```
 
-安装后重新打开会话。插件管理器会从 GitHub 获取仓库，不需要用户手动 clone 或复制 Skill。Skill 不会复制到业务仓库；项目可按需提供自己的 `AGENTS.md`、`.editorconfig` 和 `.gitattributes`。各入口的实际触发时机见 [生效与验收](skills/jojo-code-guard/references/生效与验收.md)。
+安装后重新打开会话。插件管理器会从 GitHub 获取仓库，不需要用户手动 clone 或复制 Skill。Skill 不会复制到业务仓库；项目可按需提供自己的 `AGENTS.md`、`.editorconfig` 和 `.gitattributes`。
 
 ### 升级
 
@@ -60,10 +60,11 @@ git add --chmod=+x hooks/session-start hooks/post-write-check
 
 否则 macOS/Linux 从 GitHub 安装后可能无法直接启动 SessionStart hook。
 
-日常修改会自动遵守最小 diff 规则。Claude 插件在 Edit/Write 类文件工具完成后会由
-PostToolUse 自动运行差异检查，发现阻断项会用结构化诊断要求支持该协议的客户端暂停或替换当前工具结果
-（但它发生在写入后，不能撤销已经完成的写入）。Claude 和当前实测的 Codex 0.142.3 都从包内
-`hooks/hooks.json` 发现生命周期 Hook；Codex 的执行仍取决于客户端版本、Hook 功能和信任策略。
+日常修改会自动遵守最小 diff 规则。插件在已知编辑和 shell 工具完成后会由 `PostToolUse` 自动运行差异检查；
+发现阻断项时用结构化诊断要求 AI 继续修复，但不能撤销已经完成的写入。AI 回合准备结束时，
+`Stop` 会再检查一次未被工具 matcher 捕获的写入，并使用重入标记避免循环。Claude 和当前实测的
+Codex 0.142.3 都从包内 `hooks/hooks.json` 发现生命周期 Hook；Codex 的执行仍取决于客户端版本、
+Hook 功能和信任策略。
 Hook 从业务仓库的当前工作目录启动；Codex 注入 `PLUGIN_ROOT` 和兼容变量
 `CLAUDE_PLUGIN_ROOT`，Claude 使用后者，脚本据此定位插件资源。主 Skill 会要求 AI 在修改前后检查，
 已初始化的 Git pre-commit 可在提交阶段补充机械门禁。
@@ -117,6 +118,7 @@ VS Code 设置、是否被 `.gitignore` 忽略以及是否已纳入 Git，但不
 ```
 
 Codex 插件安装或升级后需重新打开会话，使主 Skill Discovery 生效；若客户端显示插件 Hook 信任提示，
-首次安装或 Hook 内容发生变化的升级后审阅并确认。可用 Hook 列表中应出现来自 `hooks/hooks.json` 的 `SessionStart` 和
-`PostToolUse`。当前 Codex 版本仍不保证未信任 Hook 的执行，未启用时由主 Skill 指导 AI 完成检查；
+首次安装或 Hook 内容发生变化的升级后审阅并确认。可用 Hook 列表中应出现来自 `hooks/hooks.json` 的
+`SessionStart`、`PostToolUse` 和 `Stop`。当前 Codex 版本仍不保证未信任 Hook 的执行，未启用时由主 Skill
+指导 AI 完成检查；
 Git pre-commit 只是按需安装的提交阶段补充门禁。
