@@ -46,10 +46,10 @@ description: Load automatically at the start of every session and apply to every
 
 保留以下低频功能入口（不同客户端的命令语法可能不同；Codex 中最可靠的是直接选择入口或使用自然语言说明功能）：
 
-- `doctor`：检查设备、Git 环境和当前仓库配置，缺少 hook 或配置时提示初始化。
+- `doctor`：检查设备、Git、当前仓库和全局规则，缺少 hook 或配置时提示初始化；
+  确认后可覆盖或合并全局规则。
 - `check-diff`：按需检查未提交修改的范围、异常膨胀和 Git 空白错误。
 - `help`：显示 `references/usage.md` 的简明说明。
-- `sync-global-rules`：比较并在确认后同步全局 AI 规则到 `~/.claude/CLAUDE.md` 和 `~/.codex/AGENTS.md`。
 
 复杂需求直接使用自然语言，例如“检查历史提交乱码”“只修复这个文件的换行”“保留该目录 CRLF”。Skill 应先说明影响，再执行明确授权的例外。
 
@@ -64,7 +64,6 @@ description: Load automatically at the start of every session and apply to every
 ```text
 python "<jojo-code-guard>/scripts/doctor.py"
 python "<jojo-code-guard>/scripts/check_diff.py"
-python "<jojo-code-guard>/scripts/sync_global_rules.py"
 ```
 
 `doctor` 在所有系统检查 Git、Python、ripgrep、CMake、Ninja 和 Git LFS；只有 Windows 检查 PowerShell 7、gsudo、winget。
@@ -75,7 +74,10 @@ Claude 用户设置。
 安装工具必须单独确认后使用 `--install-tools --yes`。Windows 当前终端不是管理员时，doctor 会生成临时 PowerShell 脚本并通过 UAC 请求提权；使用者需自行确认 UAC 授权。Skill 不在用户仓库创建 `.text-policy.json` 等自定义策略文件，
 也不会自动生成 `.vscode/settings.json` 或 `AGENTS.md`；项目专属规则由用户按需创建并维护。
 
-`sync-global-rules` 默认只读比较两个用户级目标；报告缺失、相同或差异后，只有得到用户确认才使用 `--yes` 覆盖两个文件。
+doctor 默认只读比较 `~/.claude/CLAUDE.md` 和 `~/.codex/AGENTS.md`。需要同步时，先使用
+`--sync-global-rules overwrite` 预览整文件覆盖，或使用 `--sync-global-rules merge` 预览受管块合并；
+只有确认差异后才追加 `--yes` 写入两个目标。合并会保留目标原文，并幂等更新
+jojo-code-guard 受管块。
 
 Windows 的 PowerShell 5.1 使用 `powershell.exe`，PowerShell 7 使用 `pwsh.exe`，不是同一个可执行文件；doctor 会推荐安装/更新 PowerShell 7 并让 AI 终端调用 `pwsh`，不会删除 5.1 或假装通过 PATH 顺序替换它。
 

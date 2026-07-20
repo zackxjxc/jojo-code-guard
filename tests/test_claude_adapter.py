@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import doctor  # noqa: E402
 import sync_claude_plugin  # noqa: E402
+import sync_codex_plugin  # noqa: E402
 
 
 class ClaudeAdapterTests(unittest.TestCase):
@@ -36,6 +37,9 @@ class ClaudeAdapterTests(unittest.TestCase):
             hooks_dir.mkdir(parents=True)
             (hooks_dir / "run-hook.cmd").write_text("old\n", encoding="utf-8")
             (hooks_dir / "run-hook.sh").write_text("old\n", encoding="utf-8")
+            old_skill = destination / "skills" / "jojo-code-guard-sync-global-rules"
+            old_skill.mkdir(parents=True)
+            (old_skill / "SKILL.md").write_text("old\n", encoding="utf-8")
             with mock.patch.dict(os.environ, {"JOJO_CLAUDE_PLUGIN_DIR": str(destination)}):
                 with contextlib.redirect_stdout(io.StringIO()):
                     result = sync_claude_plugin.main()
@@ -43,11 +47,27 @@ class ClaudeAdapterTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertFalse((hooks_dir / "run-hook.cmd").exists())
             self.assertFalse((hooks_dir / "run-hook.sh").exists())
+            self.assertFalse(old_skill.exists())
             for relative in doctor.CLAUDE_PLUGIN_REQUIRED_FILES:
                 self.assertTrue((destination / relative).is_file(), relative)
             if os.name != "nt":
                 mode = (hooks_dir / "session-start").stat().st_mode
                 self.assertTrue(mode & stat.S_IXUSR)
+
+    def test_codex_sync_removes_obsolete_skill(self) -> None:
+        """Codex 同步包不得保留已合并进 doctor 的旧 Skill。"""
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "adapter"
+            old_skill = destination / "skills" / "jojo-code-guard-sync-global-rules"
+            old_skill.mkdir(parents=True)
+            (old_skill / "SKILL.md").write_text("old\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"JOJO_CODEX_PLUGIN_DIR": str(destination)}):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    result = sync_codex_plugin.main()
+
+            self.assertEqual(result, 0)
+            self.assertFalse(old_skill.exists())
+            self.assertTrue((destination / "skills" / "jojo-code-guard-doctor" / "SKILL.md").is_file())
 
     def test_manifest_uses_explicit_bash_shell(self) -> None:
         """插件 manifest 应直接通过 Bash 执行 SessionStart。"""
