@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash --norc --noprofile \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start\"",
+            "command": "bash --norc --noprofile -c 'script=\"${CLAUDE_PLUGIN_ROOT//\\\\\\\\//}/hooks/session-start\"; exec bash --norc --noprofile \"$script\"'",
             "shell": "bash",
             "async": false
           }
