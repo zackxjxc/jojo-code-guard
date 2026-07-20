@@ -75,7 +75,7 @@ class ClaudeAdapterTests(unittest.TestCase):
         handler = data["hooks"]["SessionStart"][0]["hooks"][0]
 
         self.assertEqual(handler["shell"], "bash")
-        self.assertEqual(handler["command"], 'bash "${CLAUDE_PLUGIN_ROOT}/hooks/session-start"')
+        self.assertEqual(handler["command"], 'bash --norc --noprofile "${CLAUDE_PLUGIN_ROOT}/hooks/session-start"')
         self.assertFalse(handler["async"])
 
     def test_manifest_versions_match(self) -> None:
@@ -133,7 +133,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             environment["CLAUDE_PLUGIN_ROOT"] = directory
 
             result = subprocess.run(
-                ["bash", str(ROOT / "hooks" / "session-start")],
+                ["bash", "--norc", "--noprofile", str(ROOT / "hooks" / "session-start")],
                 env=environment,
                 input=b"{}",
                 stdout=subprocess.PIPE,
