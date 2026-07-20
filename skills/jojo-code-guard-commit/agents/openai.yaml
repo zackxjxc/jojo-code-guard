@@ -1,6 +1,0 @@
-interface:
-  display_name: "jojo-code-guard:commit"
-  short_description: "测试、检查暂存区并创建提交"
-  default_prompt: "仅在用户明确要求时，使用 jojo-code-guard 完成测试、暂存区检查和 Git 提交。"
-policy:
-  allow_implicit_invocation: false

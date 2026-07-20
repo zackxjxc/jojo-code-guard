@@ -44,7 +44,7 @@ def main() -> int:
     # Claude 的 commands 由对应客户端加载；Codex 使用原生 Skill，清理本脚本曾生成的同名旧入口，避免重复触发。
     command_destination = destination / "commands"
     if command_destination.is_dir() and command_destination.resolve() != (root / "commands").resolve():
-        for name in ("check-diff.md", "commit.md", "doctor.md", "help.md"):
+        for name in ("check-diff.md", "doctor.md", "help.md"):
             legacy_command = command_destination / name
             if legacy_command.is_file():
                 legacy_command.unlink()
@@ -60,6 +60,9 @@ def main() -> int:
         old_skill = skill_destination / "jojo-code-guard-sync-global-rules"
         if old_skill.is_dir():
             shutil.rmtree(old_skill)
+        removed_commit_skill = skill_destination / "jojo-code-guard-commit"
+        if removed_commit_skill.is_dir():
+            shutil.rmtree(removed_commit_skill)
     print(f"Synced Codex plugin: {destination}")
     return 0
 

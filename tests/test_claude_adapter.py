@@ -59,7 +59,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                     self.assertTrue(mode & stat.S_IXUSR, name)
 
     def test_codex_sync_removes_obsolete_skill(self) -> None:
-        """Codex 同步包应包含提交 Skill，且不得保留旧 Skill。"""
+        """Codex 同步包应包含主 Skill，且不得保留旧 Skill。"""
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "adapter"
             old_skill = destination / "skills" / "jojo-code-guard-sync-global-rules"
@@ -72,8 +72,6 @@ class ClaudeAdapterTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertFalse(old_skill.exists())
             self.assertTrue((destination / "skills" / "jojo-code-guard-doctor" / "SKILL.md").is_file())
-            self.assertTrue((destination / "skills" / "jojo-code-guard-commit" / "SKILL.md").is_file())
-            self.assertFalse((destination / "commands" / "commit.md").exists())
             self.assertFalse((destination / "commands" / "check-diff.md").exists())
             self.assertTrue((destination / "hooks" / "hooks.json").is_file())
             self.assertTrue((destination / "hooks" / "post-write-check").is_file())
