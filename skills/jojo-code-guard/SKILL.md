@@ -68,7 +68,10 @@ python "<jojo-code-guard>/scripts/sync_global_rules.py"
 ```
 
 `doctor` 在所有系统检查 Git、Python、ripgrep、CMake、Ninja 和 Git LFS；只有 Windows 检查 PowerShell 7、gsudo、winget。
-缺少仓库配置时，先展示将创建的文件；得到确认后可执行 `doctor.py --repair --yes`，需要 hook 时再加 `--install-hook`。`AGENTS.md` 是可选项目规则文件，doctor 不会自动创建；用户需要时可自行创建并写入规则。
+缺少仓库配置时，先展示将创建的文件；得到确认后可执行 `doctor.py --repair --yes`，需要 hook 时再加
+`--install-hook`。`AGENTS.md` 是可选项目规则文件，doctor 不会自动创建；用户需要时可自行创建并写入规则。
+Claude 自动加载由插件管理器维护；doctor 只检查精确插件 ID、启用状态和安装资源，不复制独立 hook，也不改写
+Claude 用户设置。
 安装工具必须单独确认后使用 `--install-tools --yes`。Windows 当前终端不是管理员时，doctor 会生成临时 PowerShell 脚本并通过 UAC 请求提权；使用者需自行确认 UAC 授权。Skill 不在用户仓库创建 `.text-policy.json` 等自定义策略文件，
 也不会自动生成 `.vscode/settings.json` 或 `AGENTS.md`；项目专属规则由用户按需创建并维护。
 
