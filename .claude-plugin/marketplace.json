@@ -5,14 +5,14 @@
   },
   "metadata": {
     "description": "C++ 编码、换行和 Git diff 保护工具",
-    "version": "0.2.1"
+    "version": "0.2.2"
   },
   "plugins": [
     {
       "name": "jojo-code-guard",
       "source": "./",
       "description": "保护 C++ 仓库的编码、换行、Git diff 和 AI 修改",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "strict": true
     }
   ]

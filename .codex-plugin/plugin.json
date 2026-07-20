@@ -1,6 +1,6 @@
 {
   "name": "jojo-code-guard",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Protect C++ repositories from encoding, line-ending, Git diff, and AI-edit pollution.",
   "author": {
     "name": "ZACKhdn",
@@ -29,7 +29,7 @@
     ],
     "defaultPrompt": [
       "使用 jojo-code-guard 守护当前仓库。",
-      "检查当前设备和仓库的编码保护配置。"
+      "检查当前设备、仓库和全局规则配置。"
     ]
   }
 }

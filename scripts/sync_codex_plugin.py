@@ -38,6 +38,9 @@ def main() -> int:
             dirs_exist_ok=True,
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
+        old_skill = skill_destination / "jojo-code-guard-sync-global-rules"
+        if old_skill.is_dir():
+            shutil.rmtree(old_skill)
     print(f"Synced Codex plugin: {destination}")
     return 0
 

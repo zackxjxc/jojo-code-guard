@@ -21,14 +21,17 @@ def _copy(source: pathlib.Path, destination: pathlib.Path, executable: bool = Fa
         destination.chmod(destination.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def _remove_obsolete_launchers(root: pathlib.Path, destination: pathlib.Path) -> None:
-    """从生成目录移除旧版 Claude hook 启动器。"""
+def _remove_obsolete_resources(root: pathlib.Path, destination: pathlib.Path) -> None:
+    """从生成目录移除不再发布的旧版入口。"""
     if root.resolve() == destination.resolve():
         return
     for name in ("run-hook.cmd", "run-hook.sh"):
         path = destination / "hooks" / name
         if path.is_file() or path.is_symlink():
             path.unlink()
+    old_skill = destination / "skills" / "jojo-code-guard-sync-global-rules"
+    if old_skill.is_dir():
+        shutil.rmtree(old_skill)
 
 
 def _validate_adapter(destination: pathlib.Path) -> None:
@@ -83,7 +86,7 @@ def main() -> int:
             dirs_exist_ok=True,
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
-    _remove_obsolete_launchers(root, destination)
+    _remove_obsolete_resources(root, destination)
     _validate_adapter(destination)
     print(f"Synced Claude adapter: {destination}")
     return 0

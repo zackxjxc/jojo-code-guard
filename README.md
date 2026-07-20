@@ -38,10 +38,10 @@ git add --chmod=+x hooks/session-start
 Codex 中会分别显示以下入口：
 
 - `jojo-code-guard`：日常自动守护编码、换行和最小 diff。
-- `jojo-code-guard:doctor`：按需执行设备、Git 和仓库诊断。
+- `jojo-code-guard:doctor`：按需执行设备、Git、仓库和全局规则诊断，可确认后覆盖或合并
+  全局规则。
 - `jojo-code-guard:check-diff`：按需检查编码、换行和未提交 diff。
 - `jojo-code-guard:help`：查看功能和安全边界。
-- `jojo-code-guard:sync-global-rules`：比较并确认后同步两个用户级全局规则文件。
 
 主动入口示例：
 
