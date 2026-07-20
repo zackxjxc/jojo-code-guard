@@ -13,12 +13,47 @@ fi
 PLUGIN_ROOT="${PLUGIN_ROOT//\\\\//}"
 SKILL_FILE="${PLUGIN_ROOT}/skills/jojo-code-guard/SKILL.md"
 
+select_python() {
+    if command -v py >/dev/null 2>&1 && py -3 -c 'import sys' >/dev/null 2>&1; then
+        PYTHON=(py -3)
+    elif command -v python3 >/dev/null 2>&1; then
+        PYTHON=(python3)
+    elif command -v python >/dev/null 2>&1 \
+        && python -c 'import sys; raise SystemExit(sys.version_info[0] != 3)' >/dev/null 2>&1; then
+        PYTHON=(python)
+    else
+        return 1
+    fi
+}
+
+emit_context_payload() {
+    local context="$1"
+    local payload
+    if select_python && payload="$(printf '%s' "$context" | PYTHONIOENCODING=utf-8 "${PYTHON[@]}" -c '
+import json
+import sys
+
+payload = {
+    "hookSpecificOutput": {
+        "hookEventName": "SessionStart",
+        "additionalContext": sys.stdin.read(),
+    }
+}
+print(json.dumps(payload, ensure_ascii=False))
+' 2>/dev/null)"; then
+        printf '%s\n' "$payload"
+        return 0
+    fi
+    # 两端都支持普通 stdout；仅在结构化输出不可用时使用兼容回退。
+    printf '%s\n' "$context"
+}
+
 if [ ! -r "$SKILL_FILE" ]; then
     load_error="jojo-code-guard: 无法读取 Skill：${SKILL_FILE}"
     load_context="<JOJO_CODE_GUARD_LOAD_FAILED>${load_error}；"
     load_context="${load_context}必须暂停文件修改并向用户报告。</JOJO_CODE_GUARD_LOAD_FAILED>"
     printf '%s\n' "$load_error" >&2
-    printf '%s\n' "$load_context"
+    emit_context_payload "$load_context"
     exit 0
 fi
 
@@ -46,5 +81,6 @@ emit_context() {
     printf '\n</JOJO_CODE_GUARD>\n'
 }
 
-# Claude 和 Codex 都会把 SessionStart 的普通 stdout 加入模型上下文。
-emit_context
+# 结构化 additionalContext 明确标记事件边界，并保留普通 stdout 兼容回退。
+context="$(emit_context)"
+emit_context_payload "$context"

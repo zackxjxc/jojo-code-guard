@@ -1,6 +1,40 @@
 #!/usr/bin/env bash
-# 写入文件后立即运行字节和 diff 检查，并把结果反馈给会话。
+# 文件工具完成或 AI 回合结束时运行差异检查，并返回对应的 Hook 协议。
 set -u
+
+# 先读取一次事件输入，后续同时解析 cwd 和 Stop 重入标记。
+HOOK_INPUT="$(cat || true)"
+
+if command -v py >/dev/null 2>&1 && py -3 -c 'import sys' >/dev/null 2>&1; then
+    PYTHON=(py -3)
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON=(python3)
+elif command -v python >/dev/null 2>&1 \
+    && python -c 'import sys; raise SystemExit(sys.version_info[0] != 3)' >/dev/null 2>&1; then
+    PYTHON=(python)
+else
+    echo "jojo-code-guard: Python 3 is required for lifecycle checks." >&2
+    exit 2
+fi
+
+HOOK_EVENT="${1:-}"
+if [ -z "$HOOK_EVENT" ]; then
+    HOOK_EVENT="$(printf '%s' "$HOOK_INPUT" | PYTHONIOENCODING=utf-8 "${PYTHON[@]}" -c '
+import json
+import sys
+
+try:
+    value = json.load(sys.stdin).get("hook_event_name", "")
+except (AttributeError, json.JSONDecodeError, UnicodeDecodeError):
+    value = ""
+print(value if isinstance(value, str) else "")
+' 2>/dev/null || true)"
+fi
+HOOK_EVENT="${HOOK_EVENT:-PostToolUse}"
+if [ "$HOOK_EVENT" != "PostToolUse" ] && [ "$HOOK_EVENT" != "Stop" ]; then
+    echo "jojo-code-guard: unsupported hook event: ${HOOK_EVENT}" >&2
+    exit 2
+fi
 
 plugin_root="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-}}}"
 if [ -n "$plugin_root" ]; then
@@ -12,25 +46,30 @@ fi
 # 客户端在 Windows 可能传入反斜杠路径，先转换为 Bash 可识别的形式
 PLUGIN_ROOT="${PLUGIN_ROOT//\\\\//}"
 CHECK_SCRIPT="${PLUGIN_ROOT}/skills/jojo-code-guard/scripts/check_diff.py"
+
+if [ "$HOOK_EVENT" = "Stop" ]; then
+    STOP_HOOK_ACTIVE="$(printf '%s' "$HOOK_INPUT" | PYTHONIOENCODING=utf-8 "${PYTHON[@]}" -c '
+import json
+import sys
+
+try:
+    value = json.load(sys.stdin).get("stop_hook_active", False)
+except (AttributeError, json.JSONDecodeError, UnicodeDecodeError):
+    value = False
+print("true" if value is True else "false")
+' 2>/dev/null || printf 'false')"
+    if [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+        exit 0
+    fi
+fi
+
 if [ ! -r "$CHECK_SCRIPT" ]; then
     echo "jojo-code-guard: 无法读取差异检查脚本：${CHECK_SCRIPT}" >&2
     exit 2
 fi
 
-if command -v py >/dev/null 2>&1 && py -3 -c 'import sys' >/dev/null 2>&1; then
-    PYTHON=(py -3)
-elif command -v python3 >/dev/null 2>&1; then
-    PYTHON=(python3)
-elif command -v python >/dev/null 2>&1 \
-    && python -c 'import sys; raise SystemExit(sys.version_info[0] != 3)' >/dev/null 2>&1; then
-    PYTHON=(python)
-else
-    echo "jojo-code-guard: Python 3 is required for post-write checks." >&2
-    exit 2
-fi
-
 # 客户端事件中的 cwd 最接近本次工具调用；解析失败时再使用环境变量或进程目录。
-INPUT_CWD="$(PYTHONIOENCODING=utf-8 "${PYTHON[@]}" -c '
+INPUT_CWD="$(printf '%s' "$HOOK_INPUT" | PYTHONIOENCODING=utf-8 "${PYTHON[@]}" -c '
 import json
 import sys
 
@@ -49,11 +88,17 @@ else
 fi
 PROJECT_ROOT="${PROJECT_ROOT//\\\\//}"
 
+emit_empty_result() {
+    return 0
+}
+
 # 非 Git 目录不属于本守护范围，避免普通文件操作被无意义地阻断。
 if [ -z "$PROJECT_ROOT" ]; then
+    emit_empty_result
     exit 0
 fi
 if ! PROJECT_ROOT="$(git -C "$PROJECT_ROOT" rev-parse --show-toplevel 2>/dev/null)"; then
+    emit_empty_result
     exit 0
 fi
 
@@ -62,27 +107,25 @@ OUTPUT="$("${PYTHON[@]}" "$CHECK_SCRIPT" --repo "$PROJECT_ROOT" --json 2>&1)"
 STATUS=$?
 set -e
 
-# 检查脚本返回 1 表示发现污染，属于正常诊断；返回 2 以上才表示检查本身失败。
-# PostToolUse 无法撤销已经完成的写入；结构化上下文会让 AI 停止后续步骤；若仓库已安装 pre-commit，再由它执行最终机械检查。
+BLOCKED=false
 if [ "$STATUS" -ge 2 ]; then
-    printf '%s\n' "$OUTPUT" >&2
-    exit 2
-fi
-
-# 正常的空结果是 []，不向会话制造噪声；缺失输出或状态矛盾时按检查失败阻断。
-if [ -z "$OUTPUT" ]; then
-    echo "jojo-code-guard: check_diff.py returned no JSON diagnostics." >&2
-    exit 2
-fi
-if [ "$OUTPUT" = "[]" ] && [ "$STATUS" -eq 1 ]; then
-    echo "jojo-code-guard: check_diff.py returned blocked status without diagnostics." >&2
-    exit 2
-fi
-if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "[]" ]; then
-    CONTEXT="$(printf 'jojo-code-guard: AI 写入后检查结果：\n%s' "$OUTPUT")"
-    CONTINUE=true
-    if [ "$STATUS" -eq 1 ]; then
-        CONTINUE=false
+    BLOCKED=true
+    CONTEXT="jojo-code-guard: 差异检查执行失败：
+${OUTPUT}"
+elif [ -z "$OUTPUT" ]; then
+    BLOCKED=true
+    CONTEXT="jojo-code-guard: check_diff.py 未返回 JSON 诊断，已按阻断处理。"
+elif [ "$OUTPUT" = "[]" ] && [ "$STATUS" -eq 0 ]; then
+    emit_empty_result
+    exit 0
+elif [ "$OUTPUT" = "[]" ] && [ "$STATUS" -eq 1 ]; then
+    BLOCKED=true
+    CONTEXT="jojo-code-guard: check_diff.py 返回阻断状态但没有诊断，已按阻断处理。"
+else
+    if [ "$HOOK_EVENT" = "Stop" ]; then
+        CONTEXT="$(printf 'jojo-code-guard: AI 回合结束前检查结果：\n%s' "$OUTPUT")"
+    else
+        CONTEXT="$(printf 'jojo-code-guard: AI 写入后检查结果：\n%s' "$OUTPUT")"
     fi
     if BLOCKED_RESULT="$(
         printf '%s' "$OUTPUT" | "${PYTHON[@]}" -c '
@@ -95,33 +138,51 @@ if not isinstance(data, list) or not all(isinstance(item, dict) for item in data
 print("true" if any(item.get("level") == "BLOCKED" for item in data) else "false")
 ' 2>/dev/null
     )"; then
-        if [ "$BLOCKED_RESULT" = "true" ]; then
-            CONTINUE=false
+        if [ "$STATUS" -eq 1 ] || [ "$BLOCKED_RESULT" = "true" ]; then
+            BLOCKED=true
         fi
     else
-        CONTINUE=false
+        BLOCKED=true
         CONTEXT="${CONTEXT}
 jojo-code-guard: 检查输出无法解析，已按阻断处理。"
     fi
-    if ! printf '%s' "$CONTEXT" | JOJO_HOOK_CONTINUE="$CONTINUE" PYTHONIOENCODING=utf-8 "${PYTHON[@]}" -c '
+fi
+
+# Stop 只在阻断时要求继续修复；PostToolUse 会把所有诊断立即反馈给 AI。
+if [ "$HOOK_EVENT" = "Stop" ] && [ "$BLOCKED" != "true" ]; then
+    exit 0
+fi
+if ! printf '%s' "$CONTEXT" \
+    | JOJO_HOOK_EVENT="$HOOK_EVENT" JOJO_HOOK_BLOCKED="$BLOCKED" PYTHONIOENCODING=utf-8 \
+        "${PYTHON[@]}" -c '
 import json
 import os
 import sys
 
-payload = {
-    "continue": os.environ.get("JOJO_HOOK_CONTINUE") == "true",
-    "hookSpecificOutput": {
-        "hookEventName": "PostToolUse",
-        "additionalContext": sys.stdin.read(),
-    },
-}
-if not payload["continue"]:
-    payload["stopReason"] = "写入后检查发现阻断项，请先修复污染再继续"
+event = os.environ["JOJO_HOOK_EVENT"]
+blocked = os.environ.get("JOJO_HOOK_BLOCKED") == "true"
+context = sys.stdin.read()
+if event == "Stop":
+    payload = {
+        "continue": True,
+        "decision": "block",
+        "reason": context + "\n请修复阻断项并重新运行检查后再结束本回合。",
+    }
+else:
+    payload = {
+        "continue": True,
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": context,
+        },
+    }
+    if blocked:
+        payload["decision"] = "block"
+        payload["reason"] = "写入后检查发现阻断项，请先修复污染再继续"
 print(json.dumps(payload, ensure_ascii=False))
 '; then
-        echo "jojo-code-guard: failed to build structured PostToolUse output." >&2
-        exit 2
-    fi
+    echo "jojo-code-guard: failed to build structured ${HOOK_EVENT} output." >&2
+    exit 2
 fi
-# 发现诊断不伪装成命令执行失败；协议解析或输出生成失败则 fail closed。
+# 已完成的写入不会被伪装成未执行；阻断反馈会让 AI 根据诊断继续修复。
 exit 0

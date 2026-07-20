@@ -38,6 +38,11 @@ def _remove_obsolete_resources(root: pathlib.Path, destination: pathlib.Path) ->
     removed_commit_skill = destination / "skills" / "jojo-code-guard-commit"
     if removed_commit_skill.is_dir():
         shutil.rmtree(removed_commit_skill)
+    references = destination / "skills" / "jojo-code-guard" / "references"
+    for name in ("兼容性改进计划.md", "生效与验收.md"):
+        obsolete_document = references / name
+        if obsolete_document.is_file() or obsolete_document.is_symlink():
+            obsolete_document.unlink()
 
 
 def _validate_adapter(destination: pathlib.Path) -> None:

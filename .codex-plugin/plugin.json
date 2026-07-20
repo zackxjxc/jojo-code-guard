@@ -1,6 +1,6 @@
 {
   "name": "jojo-code-guard",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Protect C++ repositories from encoding, line-ending, Git diff, and AI-edit pollution.",
   "author": {
     "name": "ZACKhdn",

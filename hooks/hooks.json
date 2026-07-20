@@ -6,8 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash --norc --noprofile \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-}}}/hooks/session-start\"",
-            "commandWindows": "bash --norc --noprofile \"%CLAUDE_PLUGIN_ROOT:\\=/%/hooks/session-start\"",
+            "command": "bash --norc --noprofile \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/session-start\"",
+            "commandWindows": "bash --norc --noprofile -c IFS=;p=${PLUGIN_ROOT//\\\\//};$p/hooks/session-start",
             "async": false
           }
         ]
@@ -15,12 +15,24 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "apply_patch|Edit|Write|MultiEdit|NotebookEdit",
+        "matcher": "apply_patch|Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell",
         "hooks": [
           {
             "type": "command",
-            "command": "bash --norc --noprofile \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-}}}/hooks/post-write-check\"",
-            "commandWindows": "bash --norc --noprofile \"%CLAUDE_PLUGIN_ROOT:\\=/%/hooks/post-write-check\"",
+            "command": "bash --norc --noprofile \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/post-write-check\"",
+            "commandWindows": "bash --norc --noprofile -c IFS=;p=${PLUGIN_ROOT//\\\\//};$p/hooks/post-write-check",
+            "async": false
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash --norc --noprofile \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/post-write-check\"",
+            "commandWindows": "bash --norc --noprofile -c IFS=;p=${PLUGIN_ROOT//\\\\//};$p/hooks/post-write-check",
             "async": false
           }
         ]
