@@ -27,6 +27,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Prefer Git Bash on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\Git\bin'
+
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
 
