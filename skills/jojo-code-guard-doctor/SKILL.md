@@ -19,6 +19,7 @@ python "<jojo-code-guard>/scripts/doctor.py" --repo .
 3. 报告 `OK`、`WARNING`、`ACTION_REQUIRED` 和 `BLOCKED`，说明影响范围。
 4. 不自动转码、格式化、提交、安装工具或写入仓库配置。
 5. 只有用户明确确认后，才使用 `--repair`、`--install-hook`、`--install-tools` 和 `--yes`。
+6. Claude 插件缺失或禁用时只报告安装、启用命令，不复制 hook 或改写 Claude 用户设置。
 
 ## 适用场景
 
