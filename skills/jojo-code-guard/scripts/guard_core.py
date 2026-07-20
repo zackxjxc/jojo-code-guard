@@ -8,6 +8,7 @@ import difflib
 import os
 import pathlib
 import platform
+import re
 import shutil
 import subprocess
 from typing import Iterable, Optional, Sequence
@@ -23,12 +24,27 @@ TEXT_SUFFIXES = {
     ".bat", ".c", ".cc", ".cfg", ".cmake", ".cmd", ".cpp", ".cs", ".css",
     ".cxx", ".h", ".hh", ".hlsl", ".hpp", ".htm", ".html", ".hxx", ".ini",
     ".inl", ".ipp", ".ixx", ".java", ".js", ".json", ".jsonc", ".md", ".m", ".mm",
-    ".frag", ".glsl", ".props", ".proto", ".ps1", ".py", ".rc", ".rc2", ".sln", ".sh",
-    ".sql", ".targets", ".toml", ".ts", ".txt", ".vcxproj", ".vert", ".xml", ".yaml", ".yml",
+    ".frag", ".glsl", ".inc", ".log", ".mk", ".make", ".patch", ".props", ".proto",
+    ".ps1", ".py", ".rc", ".rc2", ".rst", ".sln", ".sh", ".sql", ".svg", ".tex",
+    ".targets", ".toml", ".ts", ".txt", ".vcxproj", ".vert", ".xml", ".yaml", ".yml",
 }
 TEXT_NAMES = {
     ".editorconfig", ".gitattributes", ".gitignore", ".gitmodules", "AGENTS.md", "CMakeLists.txt",
-    "Dockerfile", "Makefile", "session-start",
+    "Dockerfile", "Makefile", "post-write-check", "session-start",
+}
+# 常见二进制后缀不参与未知路径的文本推断，避免误报资源文件。
+BINARY_SUFFIXES = {
+    ".7z", ".a", ".avi", ".bmp", ".bz2", ".class", ".dll", ".dylib", ".eot", ".exe",
+    ".flac", ".gif", ".gz", ".ico", ".jar", ".jpeg", ".jpg", ".lib", ".m4a", ".mkv",
+    ".mov", ".mp3", ".mp4", ".o", ".obj", ".otf", ".pdb", ".pdf", ".png", ".pyc",
+    ".rar", ".so", ".tar", ".tif", ".tiff", ".ttf", ".wasm", ".wav", ".webm", ".webp",
+    ".woff", ".woff2", ".xz", ".zip",
+}
+INITIAL_BASELINE_RELAXABLE_CODES = {
+    "NEW_BOM",
+    "NEW_ENCODING",
+    "NEW_EOL",
+    "NEW_FINAL_NEWLINE",
 }
 TOOL_TEXT_SUFFIXES = {
     ".css", ".frag", ".glsl", ".hlsl", ".html", ".props", ".proto", ".sln", ".svg", ".targets", ".vcxproj", ".vert", ".xml",
@@ -88,10 +104,30 @@ def check_conversion_policy(repo: pathlib.Path, staged: bool) -> list[Diagnostic
     if diff_result.returncode == 0:
         return []
     changed_paths = _decode_paths(run_git(repo, diff_arguments + ["--name-only", "-z"], check=False))
-    if not any(is_text_path(path) for path in changed_paths):
+    changed_text = False
+    for path in changed_paths:
+        data = _blob_from_index(repo, path) if staged else _read_worktree(repo, path)
+        if data is not None and is_text_path(path, data):
+            changed_text = True
+            break
+    if not changed_text:
         return []
 
-    config_values: list[tuple[str, str]] = []
+    config_values: list[tuple[str, str, str]] = []
+    for scope in ("--system", "--global", "--local"):
+        for key in ("core.autocrlf", "core.eol"):
+            result = subprocess.run(
+                ["git", "config", scope, "--get", key],
+                cwd=str(repo),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            value = result.stdout.decode("utf-8", errors="replace").strip()
+            if value:
+                config_values.append((key, value, scope))
+
+    effective_values: dict[str, str] = {}
     for key in ("core.autocrlf", "core.eol"):
         result = subprocess.run(
             ["git", "config", "--get", key],
@@ -102,24 +138,42 @@ def check_conversion_policy(repo: pathlib.Path, staged: bool) -> list[Diagnostic
         )
         value = result.stdout.decode("utf-8", errors="replace").strip()
         if value:
-            config_values.append((key, value))
+            effective_values[key] = value
     risky = [
         (key, value)
-        for key, value in config_values
+        for key, value in effective_values.items()
         if (key == "core.autocrlf" and value.lower() not in {"false", "0"})
-        or (key == "core.eol" and value.lower() not in {"native", "unset"})
+        or (key == "core.eol" and value.lower() != "unset")
     ]
     if not risky:
         return []
-    details = ", ".join(f"{key}={value}" for key, value in risky)
+    details = ", ".join(
+        f"{key}={value}（来源：{','.join(scope for item_key, _, scope in config_values if item_key == key) or '默认'}）"
+        for key, value in risky
+    )
     level = "BLOCKED" if staged else "WARNING"
+    remedies: list[str] = []
+    for key, _ in risky:
+        if key == "core.autocrlf":
+            remedies.append("git config --local core.autocrlf false")
+        elif key == "core.eol":
+            origins = [scope for item_key, _, scope in config_values if item_key == key]
+            if "--local" in origins:
+                remedies.append("git config --local --unset core.eol")
+            elif "--global" in origins:
+                remedies.append("git config --global --unset core.eol（需确认全局影响）")
+            elif "--system" in origins:
+                remedies.append("请管理员执行 git config --system --unset core.eol")
+            else:
+                remedies.append("按 git config --show-origin --get-regexp '^core\\.eol$' 的来源处理")
     return [
         Diagnostic(
             level,
             "GIT_CONVERSION_POLICY",
             "Git",
             f"检测到 {details}；Git 可能已改写工作区换行，无法可靠恢复老文件基线。请先设置 "
-            "git config --local core.autocrlf false，并确认 .gitattributes，再检查 diff",
+            + "；".join(remedies)
+            + "，并确认 .gitattributes，再检查 diff",
         )
     ]
 
@@ -206,10 +260,30 @@ def inspect_bytes(data: bytes) -> TextInfo:
     return TextInfo(encoding, bom, eol, text.endswith(("\n", "\r")), text, False)
 
 
-def is_text_path(path: str) -> bool:
-    """根据文件名筛选需要保护的常见文本文件。"""
+def _has_disallowed_controls(text: str) -> bool:
+    """判断文本中是否包含不应出现在源码里的控制字符。"""
+    return _count_disallowed_controls(text) > 0
+
+
+def _count_disallowed_controls(text: str) -> int:
+    """统计文本中的源码控制字符数量。"""
+    return sum(
+        1
+        for char in text
+        if ord(char) < 32 and char not in {"\t", "\n", "\r", "\f", "\b"}
+    )
+
+
+def is_text_path(path: str, data: Optional[bytes] = None) -> bool:
+    """根据文件名和字节内容筛选需要保护的文本文件。"""
     item = pathlib.PurePosixPath(path.replace("\\", "/"))
-    return item.name in TEXT_NAMES or item.suffix.lower() in TEXT_SUFFIXES
+    if item.name in TEXT_NAMES or item.suffix.lower() in TEXT_SUFFIXES:
+        return True
+    if item.suffix.lower() in BINARY_SUFFIXES or data is None:
+        return False
+    info = inspect_bytes(data)
+    # 未知路径只要不是明确二进制，就作为候选文本处理；控制字符会在新增检查中阻断。
+    return not info.binary
 
 
 def _line_parts(text: str) -> list[tuple[str, str]]:
@@ -255,16 +329,29 @@ def compare_existing(path: str, old_data: bytes, new_data: bytes) -> list[Diagno
         )
         return diagnostics
 
+    old_controls = _count_disallowed_controls(old.text)
+    new_controls = _count_disallowed_controls(new.text)
+    if new_controls > old_controls:
+        diagnostics.append(Diagnostic("BLOCKED", "CONTROL_CHARACTER", path, "修改后新增源码控制字符"))
+
     old_normal = old.text.replace("\r\n", "\n").replace("\r", "\n")
     new_normal = new.text.replace("\r\n", "\n").replace("\r", "\n")
     if old_normal == new_normal and old_data != new_data:
         diagnostics.append(Diagnostic("BLOCKED", "PURE_TEXT_REWRITE", path, "内容未变，疑似仅重写编码或换行"))
         return diagnostics
 
-    if old.eol not in {"none", new.eol} and new.eol != old.eol:
+    if old.eol != new.eol:
         diagnostics.append(Diagnostic("BLOCKED", "EOL_CHANGED", path, f"换行类型发生变化：{old.eol} -> {new.eol}"))
     if old.final_newline != new.final_newline:
-        diagnostics.append(Diagnostic("WARNING", "FINAL_NEWLINE_CHANGED", path, "文件末尾换行状态发生变化"))
+        diagnostics.append(Diagnostic("BLOCKED", "FINAL_NEWLINE_CHANGED", path, "文件末尾换行状态发生变化"))
+    old_replacements = old.text.count("\ufffd")
+    new_replacements = new.text.count("\ufffd")
+    if new_replacements > old_replacements:
+        diagnostics.append(Diagnostic("BLOCKED", "REPLACEMENT_CHARACTER", path, "修改后新增 U+FFFD 替换字符"))
+    old_embedded_bom = old.text.count("\ufeff")
+    new_embedded_bom = new.text.count("\ufeff")
+    if new_embedded_bom > old_embedded_bom:
+        diagnostics.append(Diagnostic("BLOCKED", "REPEATED_BOM", path, "修改后新增正文 BOM 字符 U+FEFF"))
 
     old_parts = _line_parts(old.text)
     new_parts = _line_parts(new.text)
@@ -274,33 +361,61 @@ def compare_existing(path: str, old_data: bytes, new_data: bytes) -> list[Diagno
         [part[0] for part in new_parts],
         autojunk=False,
     )
-    for old_start, new_start, size in matcher.get_matching_blocks():
-        if any(old_parts[old_start + offset][1] != new_parts[new_start + offset][1] for offset in range(size)):
-            diagnostics.append(Diagnostic("BLOCKED", "UNCHANGED_EOL_CHANGED", path, "未修改行的换行符发生变化"))
-            break
+    for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
+        if tag == "equal":
+            if any(
+                old_parts[old_start + offset][1] != new_parts[new_start + offset][1]
+                for offset in range(old_end - old_start)
+            ):
+                diagnostics.append(
+                    Diagnostic("BLOCKED", "UNCHANGED_EOL_CHANGED", path, "未修改行的换行符发生变化")
+                )
+                break
+        elif tag == "replace":
+            # 等长替换通常表示内容被编辑但行数未变；此时换行符也必须保持逐行一致。
+            common = min(old_end - old_start, new_end - new_start)
+            if any(
+                old_parts[old_start + offset][1] != new_parts[new_start + offset][1]
+                for offset in range(common)
+            ):
+                diagnostics.append(
+                    Diagnostic("BLOCKED", "EOL_CHANGED", path, "修改行的换行符发生变化")
+                )
+                break
     return diagnostics
 
 
 def check_new(path: str, data: bytes) -> list[Diagnostic]:
     """检查新增文本文件的默认跨平台规范。"""
     suffix = pathlib.PurePosixPath(path).suffix.lower()
-    if not is_text_path(path):
+    if not is_text_path(path, data):
         return []
     info = inspect_bytes(data)
     if info.binary:
         return [Diagnostic("BLOCKED", "BINARY_SOURCE", path, "源码或配置文件被识别为二进制")]
     if info.error:
         return [Diagnostic("BLOCKED", "UNKNOWN_ENCODING", path, info.error)]
+    if info.text and _has_disallowed_controls(info.text):
+        return [Diagnostic("BLOCKED", "CONTROL_CHARACTER", path, "源码或配置文件包含控制字符")]
     if suffix == ".ps1":
         return _check_new_powershell(path, info)
     if suffix in TOOL_TEXT_SUFFIXES:
+        diagnostics: list[Diagnostic] = []
         if info.encoding != "utf-8":
-            return [Diagnostic("WARNING", "NEW_ENCODING_REVIEW", path, f"工具文件建议使用 UTF-8，当前为 {info.encoding}")]
-        if info.eol == "mixed":
-            return [Diagnostic("BLOCKED", "NEW_EOL", path, "工具文件不能混用 LF 和 CRLF")]
-        if info.bom not in {"none", "utf-8"}:
-            return [Diagnostic("WARNING", "NEW_BOM_REVIEW", path, f"工具文件 BOM 需要人工确认：{info.bom}")]
-        return []
+            diagnostics.append(
+                Diagnostic("BLOCKED", "NEW_ENCODING", path, f"新增工具文件必须使用 UTF-8，当前为 {info.encoding}")
+            )
+        if info.eol not in {"none", "lf"}:
+            diagnostics.append(Diagnostic("BLOCKED", "NEW_EOL", path, "新增工具文件默认使用 LF 换行"))
+        if info.bom != "none":
+            diagnostics.append(Diagnostic("BLOCKED", "NEW_BOM", path, f"新增工具文件不能带 BOM，当前为 {info.bom}"))
+        if info.text and not info.final_newline:
+            diagnostics.append(Diagnostic("BLOCKED", "NEW_FINAL_NEWLINE", path, "新增工具文件必须以换行结束"))
+        if info.text and "\ufffd" in info.text:
+            diagnostics.append(Diagnostic("BLOCKED", "REPLACEMENT_CHARACTER", path, "工具文件包含 U+FFFD 替换字符"))
+        if info.text and "\ufeff" in info.text:
+            diagnostics.append(Diagnostic("BLOCKED", "REPEATED_BOM", path, "工具文件正文包含额外 BOM 字符 U+FEFF"))
+        return diagnostics
     expected_bom = "utf-8" if suffix in {".rc", ".rc2"} else "none"
     expected_eol = "crlf" if suffix in {".bat", ".cmd"} else "lf"
     diagnostics: list[Diagnostic] = []
@@ -314,6 +429,8 @@ def check_new(path: str, data: bytes) -> list[Diagnostic]:
         diagnostics.append(Diagnostic("BLOCKED", "NEW_FINAL_NEWLINE", path, "新增文本文件必须以换行结束"))
     if info.text and "\ufffd" in info.text:
         diagnostics.append(Diagnostic("BLOCKED", "REPLACEMENT_CHARACTER", path, "包含 U+FFFD 替换字符"))
+    if info.text and "\ufeff" in info.text:
+        diagnostics.append(Diagnostic("BLOCKED", "REPEATED_BOM", path, "正文包含额外 BOM 字符 U+FEFF"))
     return diagnostics
 
 
@@ -412,7 +529,22 @@ def _blob_from_index(repo: pathlib.Path, path: str) -> Optional[bytes]:
     return None
 
 
-def check_changes(repo: pathlib.Path, staged: bool, include_untracked: bool = True) -> list[Diagnostic]:
+def _relax_initial_baseline(items: Iterable[Diagnostic]) -> list[Diagnostic]:
+    """仅放宽可解释的历史编码/EOL属性，不放过乱码或二进制类型错误。"""
+    return [
+        dataclasses.replace(item, level="WARNING", code="INITIAL_" + item.code)
+        if item.level == "BLOCKED" and item.code in INITIAL_BASELINE_RELAXABLE_CODES
+        else item
+        for item in items
+    ]
+
+
+def check_changes(
+    repo: pathlib.Path,
+    staged: bool,
+    include_untracked: bool = True,
+    allow_initial_baseline: bool = False,
+) -> list[Diagnostic]:
     """检查暂存区或工作区变更。"""
     diagnostics: list[Diagnostic] = []
     unborn = staged and subprocess.run(
@@ -423,21 +555,25 @@ def check_changes(repo: pathlib.Path, staged: bool, include_untracked: bool = Tr
         check=False,
     ).returncode != 0
     for status, path, old_path in _changed_entries(repo, staged):
-        if not is_text_path(path):
-            continue
         new_data = _blob_from_index(repo, path) if staged else _read_worktree(repo, path)
         if new_data is None:
             continue
+        baseline_path = old_path or path
+        old_data = None
+        if status != "A":
+            old_data = (
+                _blob_from_tree(repo, "HEAD", baseline_path)
+                if staged
+                else _blob_from_index(repo, baseline_path)
+            )
+        if not is_text_path(path, new_data) and not (
+            old_data is not None and is_text_path(baseline_path, old_data)
+        ):
+            continue
         if status == "A":
-            # 老项目首次建立 Git 基线时无法区分历史文件和新增文件，先保留原始字节；
-            # 首次提交完成后，后续新增文件才执行新文件规范检查。
             new_diagnostics = check_new(path, new_data)
-            if unborn:
-                new_diagnostics = [
-                    dataclasses.replace(item, level="WARNING", code="INITIAL_" + item.code)
-                    if item.level == "BLOCKED" else item
-                    for item in new_diagnostics
-                ]
+            if unborn and allow_initial_baseline:
+                new_diagnostics = _relax_initial_baseline(new_diagnostics)
             diagnostics.extend(new_diagnostics)
             if staged:
                 # Git 属性可能在索引和工作区之间做 clean/smudge；新增文件同时检查工作区字节，
@@ -445,23 +581,17 @@ def check_changes(repo: pathlib.Path, staged: bool, include_untracked: bool = Tr
                 working_data = _read_worktree(repo, path)
                 if working_data is not None and working_data != new_data:
                     working_diagnostics = check_new(path, working_data)
-                    if unborn:
-                        working_diagnostics = [
-                            dataclasses.replace(item, level="WARNING", code="INITIAL_" + item.code)
-                            if item.level == "BLOCKED" else item
-                            for item in working_diagnostics
-                        ]
+                    if unborn and allow_initial_baseline:
+                        working_diagnostics = _relax_initial_baseline(working_diagnostics)
                     diagnostics.extend(working_diagnostics)
             continue
-        baseline_path = old_path or path
-        old_data = _blob_from_tree(repo, "HEAD", baseline_path) if staged else _blob_from_index(repo, baseline_path)
         if old_data is not None:
             diagnostics.extend(compare_existing(path, old_data, new_data))
 
     if not staged and include_untracked:
         for path in _decode_paths(run_git(repo, ["ls-files", "--others", "--exclude-standard", "-z"])):
             data = _read_worktree(repo, path)
-            if data is not None:
+            if data is not None and is_text_path(path, data):
                 diagnostics.extend(check_new(path, data))
     return _deduplicate(diagnostics)
 
@@ -494,6 +624,31 @@ def check_diff_size(repo: pathlib.Path, staged: bool, block_format_only: bool = 
             diagnostics.append(Diagnostic(level, "FORMAT_ONLY_LARGE_DIFF", path, f"{changed} 行变化在忽略空白后消失，疑似大面积格式污染"))
         else:
             diagnostics.append(Diagnostic("WARNING", "LARGE_DIFF", path, f"单文件新增+删除 {changed} 行，需人工确认是否为必要改动"))
+    return diagnostics
+
+
+def check_filemode_changes(repo: pathlib.Path, staged: bool) -> list[Diagnostic]:
+    """阻止未明确授权的已有文件权限位变化。"""
+    arguments = ["diff", "--summary"]
+    if staged:
+        arguments.insert(1, "--cached")
+    output = run_git(repo, arguments, check=False).decode("utf-8", errors="replace")
+    diagnostics: list[Diagnostic] = []
+    for line in output.splitlines():
+        match = re.match(r"\s*mode change (\d+) => (\d+) (.+)$", line)
+        if match:
+            old_mode, new_mode, path = match.groups()
+            diagnostics.append(
+                Diagnostic(
+                    "BLOCKED",
+                    "FILEMODE_CHANGED",
+                    path,
+                    f"已有文件权限位发生变化：{old_mode} -> {new_mode}；请确认后再显式调整",
+                )
+            )
+        elif line.lstrip().startswith("typechange "):
+            path = line.split(" ", 1)[1]
+            diagnostics.append(Diagnostic("BLOCKED", "FILETYPE_CHANGED", path, "文件类型发生变化（普通文件/符号链接）"))
     return diagnostics
 
 

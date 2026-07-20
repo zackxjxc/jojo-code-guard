@@ -9,7 +9,14 @@ import pathlib
 import subprocess
 import sys
 
-from guard_core import Diagnostic, check_changes, check_conversion_policy, check_diff_size, find_repo
+from guard_core import (
+    Diagnostic,
+    check_changes,
+    check_conversion_policy,
+    check_diff_size,
+    check_filemode_changes,
+    find_repo,
+)
 
 
 def _configure_output() -> None:
@@ -75,18 +82,35 @@ def main(arguments: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=".", help="Git 工作树内的路径")
     parser.add_argument("--staged-only", action="store_true", help="只检查暂存区")
+    parser.add_argument(
+        "--allow-initial-baseline",
+        action="store_true",
+        help="允许无 HEAD 仓库保留历史编码/EOL属性（不可解码、二进制和替换字符仍阻断）",
+    )
     parser.add_argument("--json", action="store_true", help="输出 JSON")
     options = parser.parse_args(arguments)
     try:
         repo = find_repo(options.repo)
-        diagnostics = check_changes(repo, staged=True)
+        diagnostics = check_changes(
+            repo,
+            staged=True,
+            allow_initial_baseline=options.allow_initial_baseline,
+        )
         diagnostics.extend(check_conversion_policy(repo, staged=True))
         diagnostics.extend(check_diff_size(repo, staged=True))
+        diagnostics.extend(check_filemode_changes(repo, staged=True))
         diagnostics.extend(_whitespace_diagnostics(repo, staged=True))
         if not options.staged_only:
-            diagnostics.extend(check_changes(repo, staged=False))
+            diagnostics.extend(
+                check_changes(
+                    repo,
+                    staged=False,
+                    allow_initial_baseline=options.allow_initial_baseline,
+                )
+            )
             diagnostics.extend(check_conversion_policy(repo, staged=False))
             diagnostics.extend(check_diff_size(repo, staged=False))
+            diagnostics.extend(check_filemode_changes(repo, staged=False))
             diagnostics.extend(_whitespace_diagnostics(repo, staged=False))
     except RuntimeError as error:
         print(f"BLOCKED  {error}", file=sys.stderr)

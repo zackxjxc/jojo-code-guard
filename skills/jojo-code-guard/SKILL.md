@@ -13,9 +13,17 @@ description: Load automatically at the start of every session and apply to every
 
 无论用户任务是否涉及代码，都必须在每个新会话开始时加载本技能并遵守其安全边界；仅在涉及仓库或文件编辑时执行相应的 Git、编码和差异检查。
 
-自动守护只做轻量、只读的编辑前后保护：记录目标文件原始编码/BOM/EOL，执行 `git status --short` 和 `git diff --stat`，编辑后核对 diff 范围。不要每次编辑都重复安装软件或重写仓库配置。发现整文件变化、仅换行变化或未授权文件变化时立即停止并报告。若 Git 的 `core.autocrlf`/`core.eol` 可能改写工作区，先报告并要求修正；索引已经丢失的历史工作区换行无法由工具推测。Windows 上 `core.filemode` 必须为 `false`，否则 Unix 可执行权限位（100755 ↔ 100644）差异会令 `git status` 持续显示 0 行内容的 modified 文件。Git hook/pre-commit 是最终门禁，但不能替代 AI 的最小改动规则。
+自动守护只做轻量、只读的编辑前后保护：记录目标文件原始编码/BOM/EOL，执行 `git status --short` 和 `git diff --stat`，编辑后核对 diff 范围。Claude 和已启用插件 Hook 的 Codex 都可在 Edit/Write/MultiEdit/NotebookEdit 后自动运行 `post-write-check`，把诊断反馈给 AI；发现 BLOCKED 时请求支持该协议的客户端暂停或替换当前工具结果。Codex 的 `apply_patch` 会匹配 Edit/Write 别名。PostToolUse 发生在写入之后，不能撤销写入，最终硬门禁仍是 Git pre-commit。通过 Bash、外部脚本或其他客户端写文件时也要手动运行检查；如果客户端未加载或未信任插件 Hook，Codex 同样回退到 AI 主动调用 `check_diff.py`。准备提交时再用 `--staged-only` 检查暂存区。不要每次编辑都重复安装软件或重写仓库配置。发现整文件变化、仅换行变化或未授权文件变化时立即停止并报告。若 Git 的 `core.autocrlf`/`core.eol` 可能改写工作区，先报告并要求修正；索引已经丢失的历史工作区换行无法由工具推测。Windows 上 `core.filemode` 必须为 `false`，否则 Unix 可执行权限位（100755 ↔ 100644）差异会令 `git status` 持续显示 0 行内容的 modified 文件。Git hook/pre-commit 是最终门禁，但不能替代 AI 的最小改动规则。
 
-默认把所有仓库视为老项目：现有文件保真，新增文件使用 UTF-8 无 BOM；`.bat/.cmd` 使用 UTF-8 无 BOM + CRLF，并建议用 `.gitattributes` 的 `-text diff` 保留脚本字节。`.ps1` 默认按 PowerShell 7/Unix 使用 UTF-8 无 BOM + LF；若明确由 Windows PowerShell 5.1 执行且含中文，用户可自行创建项目规则文件记录 UTF-8 BOM 例外。用户明确提出的规则优先，但全局配置、批量迁移、安装软件等高影响操作必须先说明范围并确认。
+### AI 修改闭环
+
+1. 修改前读取仓库规则和 `git status --short`，确认目标文件原始编码、BOM、换行和用户已有修改。
+2. 只用最小补丁写入目标文件，不调用会批量格式化或统一换行的工具。
+3. 修改后立即确认自动 Hook 或手动运行：`python "<jojo-code-guard>/scripts/check_diff.py" --repo .`；该检查也会发现已有文件权限位或文件类型的意外变化。
+4. 发现 `BLOCKED`、整文件变化或未授权文件变化时停止，不提交，先报告并恢复本轮污染。
+5. 仅在用户明确要求创建 Git 提交时，先运行测试，再审阅并暂存目标文件和必要的 hunk，运行 `check_diff.py --staged-only`，通过后才执行 `git commit`。
+
+默认把所有仓库视为老项目：现有文件保真，新增文件使用 UTF-8 无 BOM；`.bat/.cmd` 使用 UTF-8 无 BOM + CRLF，`.gitattributes` 默认使用 `* -text`，仅对已知文本/脚本模式按需增加 `diff`。`.ps1` 默认按 PowerShell 7/Unix 使用 UTF-8 无 BOM + LF；若明确由 Windows PowerShell 5.1 执行且含中文，用户可自行创建项目规则文件记录 UTF-8 BOM 例外。用户明确提出的规则优先，但全局配置、批量迁移、安装软件等高影响操作必须先说明范围并确认。
 
 `.vscode/settings.json` 是可选的编辑器提示，不是项目编码规则的唯一来源：`.editorconfig` 和 `.gitattributes` 才是共享规则。
 检查仓库时，如果存在该文件，核对 `files.encoding`、`files.eol`、`files.autoGuessEncoding`、`editor.formatOnSave`、
@@ -50,6 +58,7 @@ description: Load automatically at the start of every session and apply to every
   确认后可覆盖或合并全局规则。
 - `check-diff`：按需检查未提交修改的范围、异常膨胀和 Git 空白错误。
 - `help`：显示 `references/usage.md` 的简明说明。
+- `commit`：按测试、暂存区检查、中文提交信息和 Git 提交的顺序执行。
 
 复杂需求直接使用自然语言，例如“检查历史提交乱码”“只修复这个文件的换行”“保留该目录 CRLF”。Skill 应先说明影响，再执行明确授权的例外。
 
@@ -67,6 +76,9 @@ python "<jojo-code-guard>/scripts/check_diff.py"
 ```
 
 `doctor` 在所有系统检查 Git、Python、ripgrep、CMake、Ninja 和 Git LFS；只有 Windows 检查 PowerShell 7、gsudo、winget。
+无 HEAD 的新仓库默认严格检查首个提交；明确导入已有老项目基线时，才在 `check_diff.py` 上使用
+`--allow-initial-baseline`，该选项只放宽可解释的新增文件编码、BOM、换行和末尾换行属性；不可解码、二进制和替换字符仍阻断。若确需让本地
+`pre-commit` 接受这次一次性导入，可显式设置 `JOJO_CODE_GUARD_ALLOW_INITIAL_BASELINE=1`；Hook 会留下警告。
 缺少仓库配置时，先展示将创建的文件；得到确认后可执行 `doctor.py --repair --yes`，需要 hook 时再加
 `--install-hook`。`AGENTS.md` 是可选项目规则文件，doctor 不会自动创建；用户需要时可自行创建并写入规则。
 Claude 自动加载由插件管理器维护；doctor 只检查精确插件 ID、启用状态和安装资源，不复制独立 hook，也不改写
@@ -81,11 +93,11 @@ jojo-code-guard 受管块。
 
 Windows 的 PowerShell 5.1 使用 `powershell.exe`，PowerShell 7 使用 `pwsh.exe`，不是同一个可执行文件；doctor 会推荐安装/更新 PowerShell 7 并让 AI 终端调用 `pwsh`，不会删除 5.1 或假装通过 PATH 顺序替换它。
 
-Claude 的自动加载使用插件内的 SessionStart hook 注入守护规则；Codex 使用原生 Skill Discovery，不执行该 Claude hook。
-Codex 入口元数据已明确声明"每条消息先检查暗号"，用于提高无显式 `$jojo-code-guard` 前缀时的隐式调用命中率；
-但这仍属于模型触发，不等同于 Codex 的系统级 SessionStart 注入。若必须强制执行，应将暗号规则同时放入全局
-`AGENTS.md` 或其他始终注入的持久规则中。
-Codex manifest 不声明 Claude 的 hook 配置，避免跨客户端误执行。
+Claude 和当前 Codex 插件运行时都可通过插件内的 `SessionStart` hook 注入守护规则；Codex 需要启用并信任插件 Hook，
+变更 Hook 配置后需重新打开会话。若客户端版本或策略不加载插件 Hook，Codex 入口元数据仍会提高 Skill 的隐式调用命中率，
+但不等同于系统级注入，此时应把暗号和检查规则放入全局 `AGENTS.md` 或手动运行脚本。
+Codex 默认发现插件根目录的 `hooks/hooks.json`，本插件在 manifest 中显式声明该路径，
+同步脚本也会复制该目录，避免适配器生成时遗漏 Hook。
 `sync_claude_plugin.py` 和 `sync_codex_plugin.py` 可从本目录重建两个适配包。GitHub 安装通过仓库内的 marketplace 清单完成；
 本机开发也可以继续直接使用 `~/.codex/skills/jojo-code-guard`。若客户端不支持隐式调用，直接用自然语言说
 “请使用 jojo-code-guard 检查当前仓库”即可。

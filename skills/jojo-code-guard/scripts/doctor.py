@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,7 @@ CLAUDE_PLUGIN_REQUIRED_FILES = (
     ".claude-plugin/plugin.json",
     "hooks/hooks.json",
     "hooks/session-start",
+    "hooks/post-write-check",
     "skills/jojo-code-guard/SKILL.md",
 )
 
@@ -194,7 +196,39 @@ def _check_hook(findings: list[Finding], repo: Path) -> None:
     else:
         hook_content = _read_utf8(pre_commit)
         if hook_content is not None and "jojo-code-guard-managed-hook" in hook_content:
-            findings.append(Finding("OK", "Git hook", str(pre_commit), "已安装啾啾代码守护 hook"))
+            source_dir = Path(__file__).resolve().parent
+            try:
+                from install_hook import WRAPPER
+            except ImportError:
+                WRAPPER = None
+            expected = {
+                "jojo_guard_core.py": source_dir / "guard_core.py",
+                "jojo_hook_check.py": source_dir / "hook_check.py",
+            }
+            stale: list[str] = []
+            for name, source in expected.items():
+                try:
+                    if not source.is_file() or not (hook / name).is_file():
+                        stale.append(name)
+                    elif (hook / name).read_bytes() != source.read_bytes():
+                        stale.append(name)
+                except OSError:
+                    stale.append(name)
+            if WRAPPER is not None and pre_commit.read_bytes() != WRAPPER.encode("utf-8"):
+                stale.insert(0, "pre-commit")
+            if stale:
+                findings.append(
+                    Finding(
+                        "ACTION_REQUIRED",
+                        "Git hook",
+                        str(pre_commit),
+                        "Hook 已安装但检查脚本不是当前版本："
+                        + ", ".join(stale)
+                        + "；请重新运行 doctor.py --install-hook --yes",
+                    )
+                )
+            else:
+                findings.append(Finding("OK", "Git hook", str(pre_commit), "已安装啾啾代码守护 hook，脚本版本匹配"))
         else:
             findings.append(Finding("WARNING", "Git hook", str(pre_commit), "已有其他 hook，未验证是否调用编码检查；不会覆盖"))
     if (repo / ".pre-commit-config.yaml").exists():
@@ -232,6 +266,16 @@ def _iter_hook_commands(value: object):
     elif isinstance(value, list):
         for child in value:
             yield from _iter_hook_commands(child)
+
+
+def _matcher_covers_tools(matcher: str, tools: tuple[str, ...]) -> bool:
+    """判断 Claude matcher 是否覆盖全部文件写入工具。"""
+    if matcher.strip() == "*":
+        return True
+    try:
+        return all(re.fullmatch(matcher, tool) is not None for tool in tools)
+    except re.error:
+        return False
 
 
 def _check_legacy_claude_hooks(
@@ -311,6 +355,46 @@ def _check_claude_hooks(findings: list[Finding]) -> None:
         )
     else:
         findings.append(Finding("OK", "Claude", "Plugin resources", str(install_path)))
+        hooks_manifest = _read_json_object(install_path / "hooks" / "hooks.json")
+        post_write = False
+        if hooks_manifest:
+            hook_groups = hooks_manifest.get("hooks")
+            entries = hook_groups.get("PostToolUse") if isinstance(hook_groups, dict) else None
+            if isinstance(entries, list):
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    matcher = entry.get("matcher")
+                    handlers = entry.get("hooks")
+                    if (
+                        not isinstance(matcher, str)
+                        or not _matcher_covers_tools(
+                            matcher,
+                            ("apply_patch", "Edit", "Write", "MultiEdit", "NotebookEdit"),
+                        )
+                        or not isinstance(handlers, list)
+                    ):
+                        continue
+                    post_write = any(
+                        isinstance(handler, dict)
+                        and handler.get("type") == "command"
+                        and isinstance(handler.get("command"), str)
+                        and "post-write-check" in handler["command"]
+                        for handler in handlers
+                    )
+                    if post_write:
+                        break
+        if post_write:
+            findings.append(Finding("OK", "Claude", "PostToolUse", "已配置 Edit/Write 后自动差异检查"))
+        else:
+            findings.append(
+                Finding(
+                    "ACTION_REQUIRED",
+                    "Claude",
+                    "PostToolUse",
+                    "插件资源存在但未配置 post-write-check；请升级或重新安装插件",
+                )
+            )
 
     if enabled is True:
         findings.append(Finding("OK", "Claude", "Plugin enabled", CLAUDE_PLUGIN_ID))
@@ -601,6 +685,7 @@ def _check_vscode_settings(findings: list[Finding], repo: Path) -> None:
     eol_values = []
     encoding_values = []
     auto_guess = False
+    auto_guess_seen = False
     format_on_save = False
     code_actions_on_save = False
     insert_final_newline = False
@@ -612,6 +697,9 @@ def _check_vscode_settings(findings: list[Finding], repo: Path) -> None:
             encoding_values.append(value)
         elif key == "files.autoGuessEncoding" and value is True:
             auto_guess = True
+            auto_guess_seen = True
+        elif key == "files.autoGuessEncoding" and value is False:
+            auto_guess_seen = True
         elif key in {"formatOnSave", "editor.formatOnSave"} and (value is True or value == "modifications"):
             format_on_save = True
         elif key == "editor.codeActionsOnSave" and value:
@@ -656,6 +744,16 @@ def _check_vscode_settings(findings: list[Finding], repo: Path) -> None:
         findings_added = True
     if auto_guess:
         findings.append(Finding("OK", "仓库", item, "启用 autoGuessEncoding，有利于打开旧编码文件"))
+        findings_added = True
+    elif auto_guess_seen:
+        findings.append(
+            Finding(
+                "WARNING",
+                "仓库",
+                item,
+                "关闭 autoGuessEncoding；打开旧编码文件时可能被错误解码并在保存时产生乱码",
+            )
+        )
         findings_added = True
     if insert_final_newline or trim_trailing_whitespace:
         enabled = []
@@ -787,7 +885,16 @@ def _check_repo(findings: list[Finding], repo: Path) -> None:
         check=False,
     )
     if head_check.returncode != 0:
-        findings.append(Finding("WARNING", "仓库", "Git 基线", "尚无首个提交；首次提交按老项目基线保留现有文件字节"))
+        findings.append(
+            Finding(
+                "WARNING",
+                "仓库",
+                "Git 基线",
+                "尚无首个提交；默认仍严格检查新增文件。若明确导入老项目历史基线，"
+                "可在 check_diff.py 中使用 --allow-initial-baseline，仅放宽可解释的编码、BOM、换行和末尾换行属性；"
+                "不可解码、二进制和替换字符仍会阻断",
+            )
+        )
     if status:
         findings.append(Finding("WARNING", "工作区", "未提交修改", "存在；修复配置前不要覆盖这些修改"))
     else:

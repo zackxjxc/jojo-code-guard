@@ -79,16 +79,24 @@ def install(repo: pathlib.Path, force_owned: bool = False) -> pathlib.Path:
     hooks_dir = _default_hooks_dir(repo)
     hooks_dir.mkdir(parents=True, exist_ok=True)
     pre_commit = hooks_dir / "pre-commit"
+    source_dir = pathlib.Path(__file__).resolve().parent
+    source_files = {
+        "jojo_guard_core.py": source_dir / "guard_core.py",
+        "jojo_hook_check.py": source_dir / "hook_check.py",
+    }
     if pre_commit.exists():
         existing = pre_commit.read_text(encoding="utf-8", errors="replace")
         if MARKER not in existing:
             raise RuntimeError(f"已有第三方 pre-commit，未覆盖：{pre_commit}")
-        if not force_owned and existing == WRAPPER:
+        copies_current = all(
+            (hooks_dir / name).is_file() and (hooks_dir / name).read_bytes() == source.read_bytes()
+            for name, source in source_files.items()
+        )
+        if not force_owned and existing == WRAPPER and copies_current:
             return pre_commit
 
-    source_dir = pathlib.Path(__file__).resolve().parent
-    shutil.copyfile(source_dir / "guard_core.py", hooks_dir / "jojo_guard_core.py")
-    shutil.copyfile(source_dir / "hook_check.py", hooks_dir / "jojo_hook_check.py")
+    for name, source in source_files.items():
+        shutil.copyfile(source, hooks_dir / name)
     pre_commit.write_bytes(WRAPPER.encode("utf-8"))
     pre_commit.chmod(pre_commit.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return pre_commit

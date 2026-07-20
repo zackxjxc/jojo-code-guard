@@ -61,6 +61,20 @@ class InstallHookTests(unittest.TestCase):
 
             self.assertEqual(pre_commit.read_bytes(), original)
 
+    def test_owned_hook_refreshes_stale_copied_scripts(self) -> None:
+        """自有 wrapper 不变时，过期的复制脚本也必须更新。"""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._init_repo(directory)
+            with mock.patch.object(install_hook, "_config", return_value=""):
+                first = install_hook.install(repo)
+                stale = first.parent / "jojo_hook_check.py"
+                stale.write_bytes(b"stale\n")
+                second = install_hook.install(repo)
+
+            source = Path(install_hook.__file__).resolve().parent / "hook_check.py"
+            self.assertEqual(second.read_bytes(), first.read_bytes())
+            self.assertEqual(stale.read_bytes(), source.read_bytes())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -41,6 +41,7 @@ def _validate_adapter(destination: pathlib.Path) -> None:
         destination / ".claude-plugin" / "marketplace.json",
         destination / "hooks" / "hooks.json",
         destination / "hooks" / "session-start",
+        destination / "hooks" / "post-write-check",
         destination / "skills" / "jojo-code-guard" / "SKILL.md",
     )
     missing = [str(path) for path in required if not path.is_file()]
@@ -70,6 +71,7 @@ def main() -> int:
         (root / ".claude-plugin" / "marketplace.json", destination / ".claude-plugin" / "marketplace.json", False),
         (root / "hooks" / "hooks.json", destination / "hooks" / "hooks.json", False),
         (root / "hooks" / "session-start", destination / "hooks" / "session-start", True),
+        (root / "hooks" / "post-write-check", destination / "hooks" / "post-write-check", True),
     ]
     for source, target, executable in files:
         _copy(source, target, executable=executable)

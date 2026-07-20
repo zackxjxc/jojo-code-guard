@@ -40,7 +40,9 @@ jobs:
 
       - name: Validate Bash hook
         shell: bash
-        run: bash -n hooks/session-start
+        run: |
+          bash -n hooks/session-start
+          bash -n hooks/post-write-check
 
       - name: Check Git whitespace
         run: git diff --check

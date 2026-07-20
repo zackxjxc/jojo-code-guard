@@ -7,7 +7,20 @@
           {
             "type": "command",
             "command": "bash --norc --noprofile -c 'script=\"${CLAUDE_PLUGIN_ROOT//\\\\\\\\//}/hooks/session-start\"; exec bash --norc --noprofile \"$script\"'",
-            "shell": "bash",
+            "commandWindows": "bash --norc --noprofile \"%CLAUDE_PLUGIN_ROOT%/hooks/session-start\"",
+            "async": false
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "apply_patch|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash --norc --noprofile -c 'script=\"${CLAUDE_PLUGIN_ROOT//\\\\\\\\//}/hooks/post-write-check\"; exec bash --norc --noprofile \"$script\"'",
+            "commandWindows": "bash --norc --noprofile \"%CLAUDE_PLUGIN_ROOT%/hooks/post-write-check\"",
             "async": false
           }
         ]

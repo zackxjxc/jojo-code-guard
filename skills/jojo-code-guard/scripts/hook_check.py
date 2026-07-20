@@ -3,14 +3,27 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import subprocess
 import sys
 
 try:
-    from jojo_guard_core import check_changes, check_conversion_policy, check_diff_size, find_repo
+    from jojo_guard_core import (
+        check_changes,
+        check_conversion_policy,
+        check_diff_size,
+        check_filemode_changes,
+        find_repo,
+    )
 except ImportError:
-    from guard_core import check_changes, check_conversion_policy, check_diff_size, find_repo
+    from guard_core import (
+        check_changes,
+        check_conversion_policy,
+        check_diff_size,
+        check_filemode_changes,
+        find_repo,
+    )
 
 
 def _configure_output() -> None:
@@ -25,9 +38,15 @@ def main() -> int:
     _configure_output()
     try:
         repo = find_repo()
-        diagnostics = check_changes(repo, staged=True)
+        allow_initial_baseline = os.environ.get("JOJO_CODE_GUARD_ALLOW_INITIAL_BASELINE") == "1"
+        diagnostics = check_changes(
+            repo,
+            staged=True,
+            allow_initial_baseline=allow_initial_baseline,
+        )
         diagnostics.extend(check_conversion_policy(repo, staged=True))
         diagnostics.extend(check_diff_size(repo, staged=True, block_format_only=True))
+        diagnostics.extend(check_filemode_changes(repo, staged=True))
     except RuntimeError as error:
         print(f"jojo-code-guard: {error}", file=sys.stderr)
         return 2
@@ -48,6 +67,12 @@ def main() -> int:
     )
     for item in diagnostics:
         print(f"{item.level} {item.code} {item.path}: {item.message}", file=sys.stderr)
+    if os.environ.get("JOJO_CODE_GUARD_ALLOW_INITIAL_BASELINE") == "1":
+        print(
+            "WARNING INITIAL_BASELINE_OVERRIDE：本次 Hook 使用了显式历史基线例外，"
+            "请在提交后尽快建立严格基线",
+            file=sys.stderr,
+        )
     if whitespace.returncode != 0:
         output = (whitespace.stdout or whitespace.stderr).decode("utf-8", errors="replace").strip()
         print(output, file=sys.stderr)

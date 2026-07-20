@@ -6,7 +6,8 @@ description: 诊断当前设备、Git 环境和仓库保护配置，并逐步引
 Python、
 CMake/Ninja（Windows 还检查 PowerShell 7、gsudo、winget），再检查根目录 AGENTS.md（如果存在）、
 .editorconfig、.gitattributes、.gitignore、.vscode/settings.json（含是否被 Git 忽略）、Git pre-commit
-和当前状态。
+和当前状态；同时核对已登记的 Claude 插件是否包含 PostToolUse 写入检查，以及仓库 Hook 复制脚本是否与当前 Skill 版本匹配。
+Codex 插件 Hook 的安装、启用和信任状态需在 Codex 的 `/hooks` 中确认。
 需要确定性检查时运行
 `python "${CLAUDE_PLUGIN_ROOT}/skills/jojo-code-guard/scripts/doctor.py" --repo .`。输出 OK、WARNING、
 ACTION_REQUIRED、BLOCKED；缺失项先展示影响，确认后才修复。AGENTS.md 是可选项目规则文件，

@@ -31,7 +31,20 @@ class ClaudeDoctorTests(unittest.TestCase):
         for relative in doctor.CLAUDE_PLUGIN_REQUIRED_FILES:
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("{}\n" if path.suffix == ".json" else "test\n", encoding="utf-8")
+            if relative == "hooks/hooks.json":
+                value = {
+                    "hooks": {
+                        "PostToolUse": [
+                            {
+                                "matcher": "apply_patch|Edit|Write|MultiEdit|NotebookEdit",
+                                "hooks": [{"type": "command", "command": "post-write-check"}],
+                            }
+                        ]
+                    }
+                }
+                path.write_text(json.dumps(value) + "\n", encoding="utf-8")
+            else:
+                path.write_text("{}\n" if path.suffix == ".json" else "test\n", encoding="utf-8")
 
     def _check(self, home: Path) -> list[doctor.Finding]:
         """在隔离的 Claude 用户目录中运行插件诊断。"""
@@ -91,6 +104,7 @@ class ClaudeDoctorTests(unittest.TestCase):
             findings = self._check(home)
 
             self.assertTrue(any(item.item == "Plugin resources" and item.level == "OK" for item in findings))
+            self.assertTrue(any(item.item == "PostToolUse" and item.level == "OK" for item in findings))
             self.assertTrue(any(item.item == "Plugin enabled" and item.level == "OK" for item in findings))
 
     def test_disabled_plugin_requires_action(self) -> None:
@@ -111,6 +125,29 @@ class ClaudeDoctorTests(unittest.TestCase):
             findings = self._check(home)
 
             self.assertTrue(any(item.item == "Plugin enabled" and item.level == "ACTION_REQUIRED" for item in findings))
+
+    def test_incomplete_post_write_matcher_requires_action(self) -> None:
+        """只覆盖 Write 的旧配置不能冒充完整的写入检查。"""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".claude"
+            install_path = Path(directory) / "plugin"
+            self._create_plugin(install_path)
+            hooks_path = install_path / "hooks" / "hooks.json"
+            hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
+            hooks["hooks"]["PostToolUse"][0]["matcher"] = "Write"
+            hooks_path.write_text(json.dumps(hooks) + "\n", encoding="utf-8")
+            self._write_json(
+                home / "settings.json",
+                {"enabledPlugins": {doctor.CLAUDE_PLUGIN_ID: True}},
+            )
+            self._write_json(
+                home / "plugins" / "installed_plugins.json",
+                {"plugins": {doctor.CLAUDE_PLUGIN_ID: [{"installPath": str(install_path)}]}},
+            )
+
+            findings = self._check(home)
+
+            self.assertTrue(any(item.item == "PostToolUse" and item.level == "ACTION_REQUIRED" for item in findings))
 
     def test_missing_plugin_resource_is_blocked(self) -> None:
         """安装登记存在但资源不完整时必须阻断。"""
