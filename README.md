@@ -2,7 +2,7 @@
 
 啾啾代码守护用于保护 C++ 老项目的编码、BOM、换行和最小 Git diff。
 
-发布仓库中的 `.bat/.cmd` 使用 UTF-8 无 BOM + CRLF，并通过 `.gitattributes` 的 `-text diff` 保留脚本字节。
+发布仓库中的 `.bat/.cmd` 使用 UTF-8 无 BOM + CRLF，并通过 `.gitattributes` 的 `text eol=crlf` 保证检出结果。
 
 ## 安装
 
@@ -99,8 +99,10 @@ VS Code 设置、是否被 `.gitignore` 忽略以及是否已纳入 Git，但不
 业务仓库通常优先跟踪 `.editorconfig` 和 `.gitattributes`；只有确定设置是团队共享内容时，才跟踪
 `.vscode/settings.json`。
 
-对于尚无相关配置的业务老项目，doctor 创建的保守模板会使用 `* -text` 和
-`charset/end_of_line = unset`，让 Git 与编辑器不主动改写历史文件；它不会用该模板覆盖仓库已有配置。
+对于尚无相关配置的业务老项目，doctor 创建的保守模板会使用 `* -text`、`*.bat text eol=crlf`、
+`*.cmd text eol=crlf` 和 `charset/end_of_line = unset`。批处理规则只覆盖 `.bat/.cmd`，其他历史文件仍保持原始字节；
+doctor 不会用模板覆盖仓库已有配置。为已有 `.gitattributes` 补充规则前会展示差异，并提示后续 checkout、reset
+或重新暂存可能把现有批处理转换为 CRLF；不会执行 `git add --renormalize`、批量改写脚本或修改暂存区。
 新增文件的编码、换行和末尾换行由守护脚本验收，需要统一换行的目录再由项目单独声明规则。
 无 HEAD 的新仓库默认严格检查首个提交；明确导入老项目历史基线时可使用
 `--allow-initial-baseline`，并应在项目变更记录中说明例外。若要让已安装的本地 Hook 同步接受一次例外，显式设置

@@ -432,6 +432,26 @@ class PluginDoctorTests(unittest.TestCase):
 class RepositorySettingsTests(unittest.TestCase):
     """验证编辑器设置不会主动统一老文件的编码或换行。"""
 
+    def _init_repo(self, repo: Path) -> None:
+        """初始化隔离 Git 仓库并关闭平台换行转换。"""
+        subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "core.safecrlf", "false"], cwd=repo, check=True)
+
+    def _attribute_findings(self, attributes: str, scripts: dict[str, bytes]) -> list[doctor.Finding]:
+        """创建属性与批处理样本并运行仓库诊断。"""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            self._init_repo(repo)
+            (repo / ".gitattributes").write_text(attributes, encoding="utf-8")
+            for relative, data in scripts.items():
+                (repo / relative).write_bytes(data)
+            if scripts:
+                subprocess.run(["git", "add", "--", *scripts], cwd=repo, check=True)
+            findings: list[doctor.Finding] = []
+            doctor._check_attributes(findings, repo)
+            return findings
+
     def _check_settings(self, value: object) -> list[doctor.Finding]:
         """在隔离目录中运行 VS Code 设置检查。"""
         with tempfile.TemporaryDirectory() as directory:
@@ -511,6 +531,65 @@ class RepositorySettingsTests(unittest.TestCase):
         self.assertEqual(warning.level, "WARNING")
         self.assertIn("覆盖 * -text", warning.message)
 
+    def test_tracked_batch_without_crlf_attributes_requires_action(self) -> None:
+        """只有 * -text 时，仓库中的批处理必须得到明确配置建议。"""
+        findings = self._attribute_findings("* -text\n", {"build.bat": b"@echo off\r\n"})
+
+        result = next(item for item in findings if item.item == "批处理 CRLF 属性")
+        self.assertEqual(result.level, "ACTION_REQUIRED")
+        self.assertIn("text=unset", result.message)
+        self.assertIn("eol=unspecified", result.message)
+
+    def test_standard_batch_attributes_and_contents_pass(self) -> None:
+        """标准批处理属性与 CRLF 工作区字节应同时通过。"""
+        findings = self._attribute_findings(
+            "* -text\n*.bat   text eol=crlf\n*.cmd   text eol=crlf\n",
+            {"build.bat": b"@echo off\r\n", "run.cmd": b"@echo off\r\n"},
+        )
+
+        self.assertTrue(any(item.item == "批处理 CRLF 属性" and item.level == "OK" for item in findings))
+        self.assertEqual(len([item for item in findings if item.area == "批处理" and item.level == "OK"]), 2)
+        attributes = next(item for item in findings if item.item == ".gitattributes")
+        self.assertEqual(attributes.level, "OK")
+        self.assertNotIn("可能规范化", attributes.message)
+
+    def test_later_rule_overriding_batch_eol_is_detected(self) -> None:
+        """后续更具体规则覆盖 CRLF 时必须报告最终属性。"""
+        findings = self._attribute_findings(
+            "* -text\n*.bat text eol=crlf\n*.cmd text eol=crlf\n*.bat eol=lf\n",
+            {"build.bat": b"@echo off\r\n"},
+        )
+
+        result = next(item for item in findings if item.item == "批处理 CRLF 属性")
+        self.assertEqual(result.level, "ACTION_REQUIRED")
+        self.assertIn("build.bat: text=set, eol=lf", result.message)
+
+    def test_batch_content_problems_are_reported_separately(self) -> None:
+        """LF、混合换行、BOM 与非 UTF-8 必须得到具体诊断。"""
+        findings = self._attribute_findings(
+            "* -text\n",
+            {
+                "lf.bat": b"@echo off\n",
+                "lf.cmd": b"@echo off\n",
+                "mixed.bat": b"@echo off\r\necho bad\n",
+                "bom.cmd": b"\xef\xbb\xbf@echo off\r\n",
+                "legacy.cmd": "echo 中文\r\n".encode("gbk"),
+            },
+        )
+        messages = {item.item: item.message for item in findings if item.area == "批处理"}
+
+        self.assertIn("当前为 LF", messages["lf.bat"])
+        self.assertIn("当前为 LF", messages["lf.cmd"])
+        self.assertIn("混合换行", messages["mixed.bat"])
+        self.assertIn("无 BOM", messages["bom.cmd"])
+        self.assertIn("不是 UTF-8", messages["legacy.cmd"])
+
+    def test_repo_without_batch_has_no_content_findings(self) -> None:
+        """没有批处理文件的老项目不应产生脚本内容告警。"""
+        findings = self._attribute_findings("* -text\n", {})
+
+        self.assertFalse(any(item.area == "批处理" for item in findings))
+
     def test_repair_corrects_windows_local_git_protections(self) -> None:
         """Windows 一次修复应校正换行转换和权限位设置。"""
         with tempfile.TemporaryDirectory() as directory:
@@ -554,7 +633,59 @@ class RepositorySettingsTests(unittest.TestCase):
         self.assertIn("charset = unset", editorconfig)
         self.assertIn("end_of_line = unset", editorconfig)
         self.assertIn("insert_final_newline = unset", editorconfig)
-        self.assertEqual(attributes.splitlines()[-1], "* -text")
+        self.assertIn("* -text", attributes.splitlines())
+        self.assertIn("*.bat text eol=crlf", attributes.splitlines())
+        self.assertIn("*.cmd text eol=crlf", attributes.splitlines())
+
+    def test_repair_appends_batch_rules_without_touching_index_or_scripts(self) -> None:
+        """修复已有属性必须保留内容、脚本和暂存区。"""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            self._init_repo(repo)
+            attributes = repo / ".gitattributes"
+            script = repo / "build.bat"
+            attributes.write_text("# team rule\n* -text\n", encoding="utf-8")
+            script.write_bytes(b"@echo off\n")
+            (repo / "staged.txt").write_text("base\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=jojo-test", "-c", "user.email=jojo@example.com", "commit", "-qm", "base"],
+                cwd=repo,
+                check=True,
+            )
+            (repo / "staged.txt").write_text("changed\n", encoding="utf-8")
+            subprocess.run(["git", "add", "staged.txt"], cwd=repo, check=True)
+            before_index = subprocess.run(
+                ["git", "diff", "--cached", "--binary"], cwd=repo, stdout=subprocess.PIPE, check=True
+            ).stdout
+            before_script = script.read_bytes()
+
+            changed = doctor.repair_repo(repo)
+
+            after_index = subprocess.run(
+                ["git", "diff", "--cached", "--binary"], cwd=repo, stdout=subprocess.PIPE, check=True
+            ).stdout
+            content = attributes.read_text(encoding="utf-8")
+            self.assertIn("# team rule", content)
+            self.assertIn("*.bat text eol=crlf", content)
+            self.assertIn("*.cmd text eol=crlf", content)
+            self.assertEqual(script.read_bytes(), before_script)
+            self.assertEqual(after_index, before_index)
+            self.assertTrue(any("未执行 renormalize" in item for item in changed))
+
+    def test_repair_preview_shows_migration_risk(self) -> None:
+        """修复前应展示拟议属性差异和迁移风险所需规则。"""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            self._init_repo(repo)
+            (repo / ".gitattributes").write_text("# keep\n* -text\n", encoding="utf-8")
+
+            preview = doctor._attributes_repair_preview(repo)
+
+        self.assertIsNotNone(preview)
+        self.assertIn("# keep", preview)
+        self.assertIn("+*.bat text eol=crlf", preview)
+        self.assertIn("+*.cmd text eol=crlf", preview)
 
     def test_legacy_attributes_keep_git_whitespace_checks(self) -> None:
         """字节保真属性不能让源码尾随空白逃过 Git 检查。"""

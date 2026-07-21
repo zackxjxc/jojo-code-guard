@@ -20,7 +20,7 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from guard_core import find_repo, run_git
+from guard_core import find_repo, inspect_bytes, run_git
 
 
 # 插件的稳定标识和两端运行时必需资源
@@ -197,15 +197,79 @@ def _check_editorconfig(findings: list[Finding], repo: Path) -> None:
         findings.append(Finding("OK", "仓库", ".editorconfig", "存在且未发现强制编码、换行或保存清理声明"))
 
 
+def _tracked_batch_paths(repo: Path) -> list[str]:
+    """返回被 Git 跟踪的 Windows 批处理文件。"""
+    output = run_git(repo, ["ls-files", "-z", "--", "*.bat", "*.cmd"], check=False)
+    return [item.decode("utf-8", errors="surrogateescape") for item in output.split(b"\0") if item]
+
+
+def _check_attr(repo: Path, paths: list[str]) -> dict[str, dict[str, str]]:
+    """用 NUL 分隔输出读取路径最终生效的 Git 属性。"""
+    if not paths:
+        return {}
+    output = run_git(repo, ["check-attr", "-z", "text", "eol", "--", *paths], check=False)
+    fields = output.split(b"\0")
+    attributes: dict[str, dict[str, str]] = {}
+    for index in range(0, len(fields) - 2, 3):
+        path = fields[index].decode("utf-8", errors="surrogateescape")
+        name = fields[index + 1].decode("ascii", errors="replace")
+        value = fields[index + 2].decode("utf-8", errors="replace")
+        attributes.setdefault(path, {})[name] = value
+    return attributes
+
+
+def _batch_attributes_are_crlf(values: dict[str, str]) -> bool:
+    """判断批处理路径的最终属性是否为标准 CRLF 配置。"""
+    return values.get("text") == "set" and values.get("eol") == "crlf"
+
+
+def _check_batch_contents(findings: list[Finding], repo: Path, paths: list[str]) -> None:
+    """检查被跟踪批处理文件的工作区编码、BOM 和换行。"""
+    for relative in paths:
+        path = repo / relative
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            info = inspect_bytes(path.read_bytes())
+        except OSError as error:
+            findings.append(Finding("WARNING", "批处理", relative, f"无法读取工作区文件：{error}"))
+            continue
+        if info.error or info.encoding != "utf-8":
+            detail = info.error or f"当前编码为 {info.encoding}"
+            findings.append(Finding("ACTION_REQUIRED", "批处理", relative, f"不是 UTF-8：{detail}"))
+        if info.bom != "none":
+            findings.append(Finding("ACTION_REQUIRED", "批处理", relative, f"必须为 UTF-8 无 BOM，当前 BOM={info.bom}"))
+        if info.eol == "mixed":
+            findings.append(Finding("ACTION_REQUIRED", "批处理", relative, "存在 LF/CRLF 混合换行，必须统一为 CRLF"))
+        elif info.eol == "lf":
+            findings.append(Finding("ACTION_REQUIRED", "批处理", relative, "当前为 LF，必须使用 CRLF"))
+        elif info.eol not in {"none", "crlf"}:
+            findings.append(Finding("ACTION_REQUIRED", "批处理", relative, f"当前换行为 {info.eol}，必须使用 CRLF"))
+        if not any(item.area == "批处理" and item.item == relative for item in findings):
+            findings.append(Finding("OK", "批处理", relative, "UTF-8 无 BOM + CRLF"))
+
+
 def _check_attributes(findings: list[Finding], repo: Path) -> None:
-    """检查 Git 属性是否可能进行隐式换行或编码转换。"""
+    """检查 Git 属性及被跟踪批处理文件的实际字节。"""
     path = repo / ".gitattributes"
+    batch_paths = _tracked_batch_paths(repo)
     if not path.exists():
-        findings.append(Finding("ACTION_REQUIRED", "仓库", ".gitattributes", "缺失；老项目建议至少加入 * -text"))
+        findings.append(
+            Finding(
+                "ACTION_REQUIRED",
+                "仓库",
+                ".gitattributes",
+                "缺失；新模板将加入 * -text、*.bat text eol=crlf 和 *.cmd text eol=crlf",
+            )
+        )
+        if batch_paths:
+            findings.append(Finding("ACTION_REQUIRED", "仓库", "批处理 CRLF 属性", "仓库存在批处理文件，但没有 Git CRLF 检出规则"))
+        _check_batch_contents(findings, repo, batch_paths)
         return
     content = _read_utf8(path)
     if content is None:
         findings.append(Finding("BLOCKED", "仓库", ".gitattributes", "不是可严格读取的 UTF-8 文件"))
+        _check_batch_contents(findings, repo, batch_paths)
         return
     lines = [
         line.strip()
@@ -213,7 +277,13 @@ def _check_attributes(findings: list[Finding], repo: Path) -> None:
         if line.strip() and not line.lstrip().startswith("#")
     ]
     risky_tokens = ("text", "text=auto", "eol=lf", "eol=crlf", "working-tree-encoding=UTF-8")
-    risky = [line for line in lines if any(token in line.split() for token in risky_tokens)]
+    standard_batch_rules = {"*.bat text eol=crlf", "*.cmd text eol=crlf"}
+    risky = [
+        line
+        for line in lines
+        if " ".join(line.lower().split()) not in standard_batch_rules
+        and any(token in line.split() for token in risky_tokens)
+    ]
     preserves_default = any(line.startswith("* -text") for line in lines)
     if risky:
         message = "存在可能规范化老文件的具体规则：" + "; ".join(risky[:6])
@@ -224,6 +294,30 @@ def _check_attributes(findings: list[Finding], repo: Path) -> None:
         findings.append(Finding("OK", "仓库", ".gitattributes", "已设置 * -text，默认不会替换老文件换行"))
     else:
         findings.append(Finding("WARNING", "仓库", ".gitattributes", "存在但未声明老项目的字节保真策略"))
+
+    probes = [".jojo-code-guard-probe.bat", ".jojo-code-guard-probe.cmd"]
+    effective = _check_attr(repo, probes + batch_paths)
+    invalid = [
+        (relative, effective.get(relative, {}))
+        for relative in probes + batch_paths
+        if not _batch_attributes_are_crlf(effective.get(relative, {}))
+    ]
+    if invalid and batch_paths:
+        details = "; ".join(
+            f"{relative}: text={values.get('text', 'unspecified')}, eol={values.get('eol', 'unspecified')}"
+            for relative, values in invalid[:8]
+        )
+        findings.append(
+            Finding(
+                "ACTION_REQUIRED",
+                "仓库",
+                "批处理 CRLF 属性",
+                "最终生效属性不是 text=set、eol=crlf，可能被后续或更具体规则覆盖：" + details,
+            )
+        )
+    elif not invalid:
+        findings.append(Finding("OK", "仓库", "批处理 CRLF 属性", "*.bat/*.cmd 最终生效属性为 text=set、eol=crlf"))
+    _check_batch_contents(findings, repo, batch_paths)
 
 
 def _check_hook(findings: list[Finding], repo: Path) -> None:
@@ -1497,10 +1591,53 @@ def _template(name: str) -> bytes:
     """返回只用于缺失文件的保守模板。"""
     templates = {
         ".editorconfig": """root = true\n\n[*]\n# 老项目不强制全局编码和换行，避免编辑器保存时改写历史文件。\ncharset = unset\nend_of_line = unset\ninsert_final_newline = unset\ntrim_trailing_whitespace = false\nindent_style = space\nindent_size = 4\n""",
-        ".gitattributes": """# 老项目默认保留文件原始字节，避免 Git 自动转换换行。\n* -text\n""",
+        ".gitattributes": (
+            "# 老项目默认保留文件原始字节，避免 Git 自动转换换行。\n"
+            "* -text\n\n"
+            "# Windows 批处理必须以 CRLF 检出，避免 cmd.exe 解析异常。\n"
+            "*.bat text eol=crlf\n"
+            "*.cmd text eol=crlf\n"
+        ),
         ".gitignore": """# 常见 C++ 构建和 IDE 输出\n/build/\n/out/\n/.vs/\n/CMakeFiles/\nCMakeCache.txt\ncompile_commands.json\n\n# 仅共享项目级 VS Code 设置\n/.vscode/*\n!/.vscode/settings.json\n""",
     }
     return templates[name].encode("utf-8")
+
+
+def _attributes_repair_preview(repo: Path) -> str | None:
+    """返回批处理属性修复的拟议差异，不修改仓库。"""
+    path = repo / ".gitattributes"
+    if not path.exists():
+        before = ""
+        after = _template(".gitattributes").decode("utf-8")
+    else:
+        before = _read_utf8(path)
+        if before is None:
+            return None
+        probes = [".jojo-code-guard-probe.bat", ".jojo-code-guard-probe.cmd"]
+        effective = _check_attr(repo, probes)
+        if all(_batch_attributes_are_crlf(effective.get(probe, {})) for probe in probes):
+            return ""
+        newline = "\r\n" if "\r\n" in before else "\n"
+        separator = "" if before.endswith(("\n", "\r")) else newline
+        after = (
+            before
+            + separator
+            + newline
+            + "# Windows 批处理必须以 CRLF 检出，避免 cmd.exe 解析异常。"
+            + newline
+            + "*.bat text eol=crlf"
+            + newline
+            + "*.cmd text eol=crlf"
+            + newline
+        )
+    return "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile="a/.gitattributes",
+            tofile="b/.gitattributes",
+        )
+    )
 
 
 def repair_repo(repo: Path, install_hook: bool = False) -> list[str]:
@@ -1511,6 +1648,27 @@ def repair_repo(repo: Path, install_hook: bool = False) -> list[str]:
         if not path.exists():
             path.write_bytes(_template(name))
             created.append(name)
+    attributes_path = repo / ".gitattributes"
+    attributes = _read_utf8(attributes_path)
+    if attributes is not None:
+        probes = [".jojo-code-guard-probe.bat", ".jojo-code-guard-probe.cmd"]
+        effective = _check_attr(repo, probes)
+        if any(not _batch_attributes_are_crlf(effective.get(probe, {})) for probe in probes):
+            newline = "\r\n" if "\r\n" in attributes else "\n"
+            separator = "" if attributes.endswith(("\n", "\r")) else newline
+            addition = (
+                separator
+                + newline
+                + "# Windows 批处理必须以 CRLF 检出，避免 cmd.exe 解析异常。"
+                + newline
+                + "*.bat text eol=crlf"
+                + newline
+                + "*.cmd text eol=crlf"
+                + newline
+            )
+            with attributes_path.open("a", encoding="utf-8", newline="") as stream:
+                stream.write(addition)
+            created.append(".gitattributes 批处理 CRLF 规则（未执行 renormalize，未修改脚本或暂存区）")
     if _config(repo, "--local", "core.autocrlf").lower() != "false":
         subprocess.run(["git", "config", "--local", "core.autocrlf", "false"], cwd=str(repo), check=True)
         created.append("git local core.autocrlf=false")
@@ -1700,6 +1858,19 @@ def main(arguments: list[str] | None = None) -> int:
     has_action = options.repair or options.install_hook or options.install_tools or options.sync_global_rules
     if has_action:
         if not options.yes:
+            if options.repair and repo is not None:
+                preview = _attributes_repair_preview(repo)
+                if preview:
+                    findings.append(
+                        Finding(
+                            "ACTION_REQUIRED",
+                            "修复",
+                            ".gitattributes 拟议差异",
+                            preview
+                            + "添加后，后续 checkout/reset/暂存可能把现有 .bat/.cmd 转换为 CRLF；"
+                            "不会执行 git add --renormalize，也不会修改脚本或暂存区",
+                        )
+                    )
             if options.sync_global_rules:
                 label = "覆盖" if options.sync_global_rules == "overwrite" else "合并"
                 findings.append(

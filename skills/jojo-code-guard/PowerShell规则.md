@@ -45,6 +45,10 @@
 
 - 新建 `.ps1` 默认使用 UTF-8 无 BOM + LF；明确由 Windows PowerShell 5.1 执行且含中文时使用 UTF-8 BOM。
 - 已有文件保持原始编码、BOM 和换行符；除非用户明确授权，不进行批量编码或换行迁移。
+- `.bat/.cmd` 必须使用 UTF-8 无 BOM + CRLF；`.gitattributes` 使用 `*.bat text eol=crlf` 和
+  `*.cmd text eol=crlf` 保证 Git 检出结果。这两条规则只覆盖批处理文件的全局 `* -text`。
+- 新建 `.gitattributes` 时默认加入上述批处理规则。已有仓库补充规则时，必须说明后续 checkout、reset
+  或重新暂存可能把现有脚本转换为 CRLF；不自动执行 `git add --renormalize`，不批量改写脚本，不修改暂存区。
 
 ### PS 5.1 写入 .ps1 后必须补 BOM
 
@@ -120,7 +124,9 @@ Start-Process -FilePath $exe -ArgumentList @("a b", "c", "d e")
 & $exe "a b" "c" "d e"
 
 # 方案 2: 临时批处理文件 (需要窗口控制时)
-"@echo off`r`n`"$exe`" $ExeArgs >`"$out`" 2>`"$err`"" | Out-File $bat -Encoding ASCII
+$batContent = "@echo off`r`n`"$exe`" $ExeArgs >`"$out`" 2>`"$err`""
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[IO.File]::WriteAllText($bat, $batContent, $utf8NoBom)
 Start-Process -FilePath $bat -WindowStyle Hidden -Wait -PassThru
 ```
 
@@ -181,7 +187,8 @@ if ($p.ExitCode -ne 0) { ... }
 ```powershell
 # 需要 隐藏窗口 + 捕获输出 时的正确做法:
 $batContent = "@echo off`r`n`"$exe`" $ExeArgs >`"$outFile`" 2>&1"
-$batContent | Out-File -FilePath $batFile -Encoding ASCII
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[IO.File]::WriteAllText($batFile, $batContent, $utf8NoBom)
 Start-Process -FilePath $batFile -WindowStyle Hidden -Wait -PassThru
 ```
 
@@ -246,9 +253,10 @@ cmd /c "C:\path with spaces\app.exe" arg1 arg2
 ## 11. 临时批处理文件规范
 
 ```powershell
-# ASCII 编码 + CRLF 换行
+# UTF-8 无 BOM + CRLF 换行
 $batContent = "@echo off`r`n`"$exe`" $ExeArgs"
-$batContent | Out-File -FilePath $batFile -Encoding ASCII
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[IO.File]::WriteAllText($batFile, $batContent, $utf8NoBom)
 ```
 
 **仅 Windows 适用。**

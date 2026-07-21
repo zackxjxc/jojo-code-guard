@@ -1,7 +1,7 @@
 * text=auto eol=lf
 
-*.bat   -text diff
-*.cmd   -text diff
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
 .editorconfig text eol=lf
 .gitattributes text eol=lf
 .gitignore text eol=lf

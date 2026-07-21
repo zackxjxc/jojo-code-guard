@@ -434,6 +434,56 @@ def check_new(path: str, data: bytes) -> list[Diagnostic]:
     return diagnostics
 
 
+def _batch_attributes_require_crlf(repo: pathlib.Path, path: str) -> bool:
+    """检查批处理路径最终生效的 Git 属性。"""
+    suffix = pathlib.PurePosixPath(path).suffix.lower()
+    if suffix not in {".bat", ".cmd"}:
+        return False
+    output = run_git(repo, ["check-attr", "-z", "text", "eol", "--", path], check=False)
+    fields = output.split(b"\0")
+    values: dict[str, str] = {}
+    for index in range(0, len(fields) - 2, 3):
+        name = fields[index + 1].decode("ascii", errors="replace")
+        values[name] = fields[index + 2].decode("utf-8", errors="replace")
+    return values.get("text") == "set" and values.get("eol") == "crlf"
+
+
+def _check_batch_crlf(path: str, data: bytes) -> list[Diagnostic]:
+    """按有效 Git 属性检查批处理工作区原始字节。"""
+    info = inspect_bytes(data)
+    diagnostics: list[Diagnostic] = []
+    if info.error or info.encoding != "utf-8":
+        detail = info.error or f"当前为 {info.encoding}"
+        diagnostics.append(Diagnostic("BLOCKED", "BATCH_ENCODING", path, f"批处理必须使用 UTF-8：{detail}"))
+    if info.bom != "none":
+        diagnostics.append(Diagnostic("BLOCKED", "BATCH_BOM", path, f"批处理必须为 UTF-8 无 BOM，当前为 {info.bom}"))
+    if info.eol == "mixed":
+        diagnostics.append(Diagnostic("BLOCKED", "BATCH_EOL", path, "批处理存在 LF/CRLF 混合换行，必须统一为 CRLF"))
+    elif info.eol == "lf":
+        diagnostics.append(Diagnostic("BLOCKED", "BATCH_EOL", path, "批处理当前为 LF，必须使用 CRLF"))
+    elif info.eol not in {"none", "crlf"}:
+        diagnostics.append(Diagnostic("BLOCKED", "BATCH_EOL", path, f"批处理换行为 {info.eol}，必须使用 CRLF"))
+    return diagnostics
+
+
+def _normalize_batch_for_index(data: bytes) -> bytes:
+    """把已验证的 CRLF 工作区字节转换为 Git 索引使用的 LF。"""
+    return data.replace(b"\r\n", b"\n")
+
+
+def _check_tracked_batch_worktree(repo: pathlib.Path) -> list[Diagnostic]:
+    """扫描标准 Git 属性覆盖的批处理，防止 clean 结果掩盖工作区 LF。"""
+    paths = _decode_paths(run_git(repo, ["ls-files", "-z", "--", "*.bat", "*.cmd"], check=False))
+    diagnostics: list[Diagnostic] = []
+    for path in paths:
+        if not _batch_attributes_require_crlf(repo, path):
+            continue
+        data = _read_worktree(repo, path)
+        if data is not None:
+            diagnostics.extend(_check_batch_crlf(path, data))
+    return diagnostics
+
+
 def _check_new_powershell(path: str, info: TextInfo) -> list[Diagnostic]:
     """按 PowerShell 运行目标检查新增脚本的 BOM 和换行。"""
     diagnostics: list[Diagnostic] = []
@@ -570,12 +620,17 @@ def check_changes(
             old_data is not None and is_text_path(baseline_path, old_data)
         ):
             continue
+        batch_crlf = _batch_attributes_require_crlf(repo, path)
+        working_data = _read_worktree(repo, path) if batch_crlf else None
+        if batch_crlf and working_data is not None:
+            diagnostics.extend(_check_batch_crlf(path, working_data))
         if status == "A":
-            new_diagnostics = check_new(path, new_data)
+            policy_data = working_data if batch_crlf and working_data is not None else new_data
+            new_diagnostics = check_new(path, policy_data)
             if unborn and allow_initial_baseline:
                 new_diagnostics = _relax_initial_baseline(new_diagnostics)
             diagnostics.extend(new_diagnostics)
-            if staged:
+            if staged and not batch_crlf:
                 # Git 属性可能在索引和工作区之间做 clean/smudge；新增文件同时检查工作区字节，
                 # 防止 CRLF 被规范化后掩盖实际保存格式。
                 working_data = _read_worktree(repo, path)
@@ -586,13 +641,16 @@ def check_changes(
                     diagnostics.extend(working_diagnostics)
             continue
         if old_data is not None:
-            diagnostics.extend(compare_existing(path, old_data, new_data))
+            comparison_old = _normalize_batch_for_index(old_data) if batch_crlf else old_data
+            comparison_new = _normalize_batch_for_index(new_data) if batch_crlf else new_data
+            diagnostics.extend(compare_existing(path, comparison_old, comparison_new))
 
     if not staged and include_untracked:
         for path in _decode_paths(run_git(repo, ["ls-files", "--others", "--exclude-standard", "-z"])):
             data = _read_worktree(repo, path)
             if data is not None and is_text_path(path, data):
                 diagnostics.extend(check_new(path, data))
+    diagnostics.extend(_check_tracked_batch_worktree(repo))
     return _deduplicate(diagnostics)
 
 

@@ -594,13 +594,13 @@ class ClaudeAdapterTests(unittest.TestCase):
 
         self.assertEqual(source, {"source": "local", "path": "./"})
 
-    def test_release_repository_attributes_preserve_script_bytes(self) -> None:
-        """发布仓库应统一文本换行，同时保留批处理脚本的原始字节。"""
+    def test_release_repository_attributes_checkout_batch_as_crlf(self) -> None:
+        """发布仓库应统一普通文本为 LF，并把批处理检出为 CRLF。"""
         lines = (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
 
         self.assertIn("* text=auto eol=lf", lines)
-        self.assertIn("*.bat   -text diff", lines)
-        self.assertIn("*.cmd   -text diff", lines)
+        self.assertIn("*.bat   text eol=crlf", lines)
+        self.assertIn("*.cmd   text eol=crlf", lines)
         self.assertIn("hooks/session-start text eol=lf", lines)
         self.assertIn("hooks/post-write-check text eol=lf", lines)
 

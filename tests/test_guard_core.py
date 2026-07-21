@@ -121,6 +121,82 @@ class TextPolicyTests(unittest.TestCase):
 
         self.assertIn("NEW_EOL", {item.code for item in diagnostics})
 
+    def test_new_batch_rejects_mixed_eol_bom_and_non_utf8(self) -> None:
+        """新增批处理的混合换行、BOM 和非 UTF-8 必须分别阻断。"""
+        cases = {
+            "mixed.bat": (b"@echo off\r\necho bad\n", "NEW_EOL"),
+            "bom.cmd": (b"\xef\xbb\xbf@echo off\r\n", "NEW_BOM"),
+            "legacy.bat": ("echo 中文\r\n".encode("gbk"), "NEW_ENCODING"),
+        }
+        for path, (data, expected) in cases.items():
+            with self.subTest(path=path):
+                self.assertIn(expected, {item.code for item in check_new(path, data)})
+
+    def test_effective_crlf_attributes_check_modified_worktree_bytes(self) -> None:
+        """标准属性生效后，守护应检查工作区 CRLF 而不是被索引 LF 掩盖。"""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "core.safecrlf", "false"], cwd=repo, check=True)
+            (repo / ".gitattributes").write_text(
+                "* -text\n*.bat text eol=crlf\n*.cmd text eol=crlf\n", encoding="utf-8"
+            )
+            script = repo / "build.bat"
+            script.write_bytes(b"@echo off\r\necho base\r\n")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=jojo-test", "-c", "user.email=jojo@example.com", "commit", "-qm", "base"],
+                cwd=repo,
+                check=True,
+            )
+
+            script.write_bytes(b"@echo off\r\necho changed\r\n")
+            unstaged = check_changes(repo, staged=False)
+            subprocess.run(["git", "add", "build.bat"], cwd=repo, check=True)
+            staged = check_changes(repo, staged=True)
+
+            self.assertFalse(any(item.level == "BLOCKED" for item in unstaged), unstaged)
+            self.assertFalse(any(item.level == "BLOCKED" for item in staged), staged)
+
+            script.write_bytes(b"@echo off\necho broken\n")
+            broken = check_changes(repo, staged=False)
+
+        self.assertIn("BATCH_EOL", {item.code for item in broken})
+
+    def test_crlf_attribute_allows_first_index_normalization(self) -> None:
+        """新增 CRLF 属性后，首次暂存不应把预期的索引 LF 迁移误报为污染。"""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "core.safecrlf", "false"], cwd=repo, check=True)
+            attributes = repo / ".gitattributes"
+            script = repo / "legacy.cmd"
+            attributes.write_text("* -text\n", encoding="utf-8")
+            script.write_bytes(b"@echo off\r\necho base\r\n")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=jojo-test", "-c", "user.email=jojo@example.com", "commit", "-qm", "base"],
+                cwd=repo,
+                check=True,
+            )
+            attributes.write_text(
+                "* -text\n*.bat text eol=crlf\n*.cmd text eol=crlf\n", encoding="utf-8"
+            )
+            subprocess.run(["git", "add", ".gitattributes"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=jojo-test", "-c", "user.email=jojo@example.com", "commit", "-qm", "attrs"],
+                cwd=repo,
+                check=True,
+            )
+            script.write_bytes(b"@echo off\r\necho changed\r\n")
+            subprocess.run(["git", "add", "legacy.cmd"], cwd=repo, check=True)
+
+            diagnostics = check_changes(repo, staged=True)
+
+        self.assertFalse(any(item.level == "BLOCKED" for item in diagnostics), diagnostics)
+
     def test_unknown_text_suffix_uses_new_file_policy(self) -> None:
         """未知后缀的可识别文本也必须执行新增文件规则。"""
         diagnostics = check_new("notes.custom", "中文".encode("cp936"))

@@ -2,6 +2,12 @@
 
 本文件记录 jojo-code-guard 的重要变更。
 
+## [0.2.7] - 2026-07-21
+
+- 默认 `.gitattributes` 为 `.bat/.cmd` 增加 `text eol=crlf`，同时保留其他老文件的 `* -text` 策略。
+- doctor 使用 Git 最终属性诊断批处理规则覆盖，并分别报告脚本编码、BOM 和换行问题。
+- doctor 修复保留已有属性内容且不 renormalize、不改脚本或暂存区；guard 与测试同步验证 CRLF 工作区字节。
+
 ## [0.2.6] - 2026-07-21
 
 - doctor 增加远端版本检查；发现新版本时明确提示 Skill 不会自行更新，并给出 Claude/Codex 更新入口。
