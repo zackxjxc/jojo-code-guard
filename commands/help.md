@@ -12,4 +12,5 @@ codex plugin add jojo-code-guard@jojo-code-guard
 codex plugin list
 ```
 
-Codex 暂无内置自动升级开关；可将上述命令交给 macOS `launchd`、Linux `systemd timer` 或 `cron` 定期执行。升级后需重新打开 Codex 会话，新版本才会生效。
+Codex 暂无内置自动升级开关；doctor 会只读检查远端版本并提示更新，但不会自行安装。可将上述命令交给
+macOS `launchd`、Linux `systemd timer` 或 `cron` 定期执行。升级后需重新打开 Codex 会话，新版本才会生效。

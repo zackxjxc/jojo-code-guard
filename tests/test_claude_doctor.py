@@ -91,6 +91,37 @@ class PluginDoctorTests(unittest.TestCase):
             doctor._check_claude_hooks(findings)
         return findings
 
+    def test_new_remote_version_requires_update(self) -> None:
+        """远端版本较新时应提示用户更新，不能声称 Skill 会自行升级。"""
+        findings: list[doctor.Finding] = []
+        with mock.patch.object(doctor, "_fetch_remote_plugin_version", return_value=("0.2.10", None)):
+            doctor._check_plugin_update(findings, "0.2.9")
+
+        result = next(item for item in findings if item.item == "发现新版本")
+        self.assertEqual(result.level, "ACTION_REQUIRED")
+        self.assertIn("不会自行更新", result.message)
+        self.assertIn("codex plugin marketplace upgrade", result.message)
+        self.assertIn("codex plugin add", result.message)
+        self.assertIn("/plugin marketplace update", result.message)
+        self.assertIn("/plugin install", result.message)
+
+    def test_current_remote_version_needs_no_update(self) -> None:
+        """当前版本不落后时更新检查应通过。"""
+        findings: list[doctor.Finding] = []
+        with mock.patch.object(doctor, "_fetch_remote_plugin_version", return_value=("0.2.6", None)):
+            doctor._check_plugin_update(findings, "0.2.6")
+
+        self.assertEqual(findings, [doctor.Finding("OK", "插件更新", "远端版本", "当前 0.2.6，远端 0.2.6，无需更新")])
+
+    def test_update_check_network_failure_is_warning(self) -> None:
+        """网络不可用不能阻断 doctor 的其他只读诊断。"""
+        findings: list[doctor.Finding] = []
+        with mock.patch.object(doctor, "_fetch_remote_plugin_version", return_value=(None, "network unavailable")):
+            doctor._check_plugin_update(findings, "0.2.6")
+
+        self.assertEqual(findings[0].level, "WARNING")
+        self.assertIn("network unavailable", findings[0].message)
+
     def test_unrelated_session_start_is_not_accepted(self) -> None:
         """其他工具的 SessionStart 不能被误认成 jojo-code-guard。"""
         with tempfile.TemporaryDirectory() as directory:

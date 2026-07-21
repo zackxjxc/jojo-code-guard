@@ -9,7 +9,7 @@
 ### Codex
 
 ```bash
-codex plugin marketplace add ZACKhdn/jojo-code-guard
+codex plugin marketplace add zackxjxc/jojo-code-guard
 codex plugin add jojo-code-guard@jojo-code-guard
 ```
 
@@ -17,7 +17,7 @@ codex plugin add jojo-code-guard@jojo-code-guard
 
 ```bash
 # 在 Claude Code 会话内执行
-/plugin marketplace add ZACKhdn/jojo-code-guard
+/plugin marketplace add zackxjxc/jojo-code-guard
 /plugin install jojo-code-guard@jojo-code-guard
 ```
 
@@ -43,6 +43,9 @@ Claude Code 手动升级时，先刷新市场快照，再重新安装插件：
 ```
 
 升级后请重新打开 Claude Code 会话，使新版本生效。
+
+Skill 运行期间不会自行替换已安装插件。`doctor` 会只读查询远端发布 manifest；发现新版本时提示两端的
+更新命令，网络不可用时只报告警告，不影响其他诊断。
 
 如需定期自动检查，可将上述命令交给 macOS 的 `launchd`、Linux 的 `systemd timer` 或 `cron` 执行。例如使用 `cron` 每天检查一次：
 

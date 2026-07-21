@@ -15,6 +15,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -25,6 +27,9 @@ from guard_core import find_repo, run_git
 PLUGIN_ID = "jojo-code-guard@jojo-code-guard"
 CLAUDE_PLUGIN_ID = PLUGIN_ID
 CODEX_PLUGIN_ID = PLUGIN_ID
+REMOTE_PLUGIN_MANIFEST_URL = (
+    "https://raw.githubusercontent.com/zackxjxc/jojo-code-guard/master/.claude-plugin/plugin.json"
+)
 CLAUDE_PLUGIN_REQUIRED_FILES = (
     ".claude-plugin/plugin.json",
     "hooks/hooks.json",
@@ -371,6 +376,74 @@ def _check_source_plugin_version(findings: list[Finding]) -> str | None:
     version = next(iter(unique))
     findings.append(Finding("OK", "插件源码", "Version", f"当前 doctor 随附版本 {version}（{summary}）"))
     return version
+
+
+def _fetch_remote_plugin_version() -> tuple[str | None, str | None]:
+    """从发布仓库读取最新版号，网络失败时返回可展示的原因。"""
+    request = urllib.request.Request(
+        REMOTE_PLUGIN_MANIFEST_URL,
+        headers={"User-Agent": "jojo-code-guard-doctor"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            data = response.read(64 * 1024 + 1)
+        if len(data) > 64 * 1024:
+            return None, "远端 manifest 超过 64 KiB"
+        manifest = json.loads(data.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, urllib.error.URLError) as error:
+        return None, str(error)
+    version = manifest.get("version") if isinstance(manifest, dict) else None
+    if not isinstance(version, str) or not version.strip():
+        return None, "远端 manifest 缺少有效 version"
+    return version.strip(), None
+
+
+def _semantic_version_key(version: str) -> tuple[int, int, int] | None:
+    """解析 doctor 使用的三段式发布版本号。"""
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def _check_plugin_update(findings: list[Finding], current_version: str | None) -> None:
+    """比较当前 Skill 与远端发布版本，并给出客户端更新命令。"""
+    if current_version is None:
+        findings.append(Finding("WARNING", "插件更新", "远端版本", "当前版本未知，跳过更新检查"))
+        return
+    remote_version, error = _fetch_remote_plugin_version()
+    if remote_version is None:
+        findings.append(
+            Finding("WARNING", "插件更新", "远端版本", f"无法检查更新：{error or '未知错误'}")
+        )
+        return
+    current_key = _semantic_version_key(current_version)
+    remote_key = _semantic_version_key(remote_version)
+    if current_key is None or remote_key is None:
+        findings.append(
+            Finding(
+                "WARNING",
+                "插件更新",
+                "远端版本",
+                f"无法比较版本号：当前 {current_version}，远端 {remote_version}",
+            )
+        )
+        return
+    if remote_key > current_key:
+        findings.append(
+            Finding(
+                "ACTION_REQUIRED",
+                "插件更新",
+                "发现新版本",
+                f"当前 {current_version}，远端 {remote_version}；Skill 不会自行更新。"
+                "Codex 请依次运行 `codex plugin marketplace upgrade jojo-code-guard`、"
+                "`codex plugin add jojo-code-guard@jojo-code-guard`；"
+                "Claude Code 请依次运行 `/plugin marketplace update jojo-code-guard`、"
+                "`/plugin install jojo-code-guard@jojo-code-guard`，最后重启客户端",
+            )
+        )
+    else:
+        findings.append(
+            Finding("OK", "插件更新", "远端版本", f"当前 {current_version}，远端 {remote_version}，无需更新")
+        )
 
 
 def _hook_manifest_path(plugin_root: Path, client: str) -> Path:
@@ -1619,6 +1692,7 @@ def main(arguments: list[str] | None = None) -> int:
 
     # 两端插件状态无论是否在仓库中都只读检查
     expected_version = _check_source_plugin_version(findings)
+    _check_plugin_update(findings, expected_version)
     _check_claude_hooks(findings, expected_version=expected_version)
     _check_codex_plugin(findings, expected_version=expected_version)
     _check_global_rules(findings, mode=options.sync_global_rules)
