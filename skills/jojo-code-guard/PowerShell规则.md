@@ -548,6 +548,23 @@ $PSNativeCommandUseErrorActionPreference = $true   # 默认 $false
 
 ---
 
+## 26. 需要用户手动执行的复杂命令保持单行
+
+需要用户在系统默认 PowerShell 命令行窗口中手动执行复杂命令时，默认只提供可直接粘贴的一行版本，
+不要提供依赖换行、续行符或多行粘贴的版本。
+
+如果命令过长、引号或流程控制复杂，优先生成一个本地 `.ps1` 脚本文件，并只向用户提供一条执行该脚本的
+单行命令，例如：
+
+```powershell
+pwsh -File .\scripts\run-task.ps1
+```
+
+脚本文件仍须遵守本文档的编码、版本兼容和安全规则。用户明确要求多行示例，或目标终端已确认支持可靠的
+多行粘贴时，可以按用户要求提供多行版本。
+
+---
+
 ## 速查表: 规则 × 平台/版本
 
 | # | 规则 | PS5.1 Win | PS7 Win | PS7 Unix | 关键差异 |
@@ -577,6 +594,7 @@ $PSNativeCommandUseErrorActionPreference = $true   # 默认 $false
 | 23 | RunAs CWD | ✅ | ✅ | 🔴不适用 | 提权后CWD→System32 |
 | 24 | ErrorAction | ✅ | ✅ | ✅ | Continue+try/catch |
 | 25 | 总结 | ✅ | 参考 | 参考 | — |
+| 26 | 手动复杂命令单行化 | ✅ | ✅ | 🔴不适用 | 过于复杂时生成 .ps1，并给出单行执行命令 |
 
 ---
 
@@ -599,3 +617,4 @@ $PSNativeCommandUseErrorActionPreference = $true   # 默认 $false
 - [ ] 跨 shell 调用使用 `-File` 而非 `-Command`?
 - [ ] `Start-Process -Verb RunAs` 使用了绝对路径 + `-WorkingDirectory`?
 - [ ] 对可能不存在的 cmdlet (如 Remove-NetAdapter) 做了 try/catch?
+- [ ] 需要用户手动执行的复杂命令只提供单行版本，或生成了 `.ps1` 并提供单行执行命令?
