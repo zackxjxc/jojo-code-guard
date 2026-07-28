@@ -20,7 +20,7 @@ python "<jojo-code-guard>/scripts/doctor.py" --repo .
 4. 默认只读，不自动转码、格式化、安装工具或写入仓库配置；同时报告 Claude/Codex 插件版本、启用状态、
    `SessionStart`、`PostToolUse`、`Stop` 和本地 Hook 复制脚本是否过期。
 5. 只读查询远端发布版本；Skill 不会自行更新，发现新版本时提示用户更新并重启对应客户端。
-6. 全局规则同步先用 `--sync-global-rules overwrite` 或 `--sync-global-rules merge` 预览差异。
+6. 全局规则同步先用 `--sync-global-rules` 预览 jojo-code-guard 自动加载节的差异。
 7. 只有用户明确确认后，才为写入操作追加 `--yes`。
 8. 插件缺失或禁用时只报告安装、启用命令，不复制 Hook 或改写用户设置；Codex Hook 信任和两端实际执行
    必须单列为人工验收项，本 Skill 不根据配置或缓存虚构已信任、已执行状态。
@@ -28,6 +28,6 @@ python "<jojo-code-guard>/scripts/doctor.py" --repo .
 ## 适用场景
 
 - 用户要求检查设备、Git 或仓库配置。
-- 比较、覆盖或合并 Claude 与 Codex 的用户级全局规则。
+- 检查或同步 Claude 与 Codex 用户级全局规则中的 jojo-code-guard 自动加载节。
 - 准备安装 pre-commit hook。
 - 需要确认 PowerShell 7、Python、Git LFS 等工具是否可用。

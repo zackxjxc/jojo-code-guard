@@ -8,7 +8,7 @@ description: 显示 jojo-code-guard 的功能、入口和安全边界，不修�
 说明主 Skill 的自动行为和低频入口：
 
 - 主入口 `jojo-code-guard`：日常保护旧文件编码、BOM、换行和最小 diff。
-- `jojo-code-guard-doctor`：诊断设备、Git、仓库、全局规则和远端版本，确认后可覆盖或合并全局规则。
+- `jojo-code-guard-doctor`：诊断设备、Git、仓库、全局规则和远端版本，确认后只同步自动加载节。
 - `jojo-code-guard-check-diff`：检查未提交修改，默认只读。
 - 当前入口：显示本说明，不修改文件、不安装工具。
 

@@ -68,7 +68,7 @@ def main() -> int:
         if removed_commit_skill.is_dir():
             shutil.rmtree(removed_commit_skill)
         references = skill_destination / "jojo-code-guard" / "references"
-        for name in ("兼容性改进计划.md", "生效与验收.md"):
+        for name in ("兼容性改进计划.md", "生效与验收.md", "全局规则.md"):
             obsolete_document = references / name
             if obsolete_document.is_file() or obsolete_document.is_symlink():
                 obsolete_document.unlink()

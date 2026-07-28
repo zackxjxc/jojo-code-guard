@@ -36,21 +36,30 @@ CLAUDE_PLUGIN_REQUIRED_FILES = (
     "hooks/session-start",
     "hooks/post-write-check",
     "skills/jojo-code-guard/SKILL.md",
+    "skills/jojo-code-guard/通用规则.md",
+    "skills/jojo-code-guard/references/自动加载规则.md",
 )
 CODEX_PLUGIN_REQUIRED_FILES = (
     ".codex-plugin/plugin.json",
     "hooks/session-start",
     "hooks/post-write-check",
     "skills/jojo-code-guard/SKILL.md",
+    "skills/jojo-code-guard/通用规则.md",
+    "skills/jojo-code-guard/references/自动加载规则.md",
 )
 
-# doctor 管理的用户级规则目标和合并块边界
+# doctor 管理的用户级规则目标和自动加载节标题
 GLOBAL_RULE_TARGET_RELATIVE_PATHS = (
     Path(".claude") / "CLAUDE.md",
     Path(".codex") / "AGENTS.md",
 )
-GLOBAL_RULE_START_MARKER = "<!-- jojo-code-guard:global-rules:start -->"
-GLOBAL_RULE_END_MARKER = "<!-- jojo-code-guard:global-rules:end -->"
+GLOBAL_RULE_CREATED_TITLE = "# 全局规则"
+GLOBAL_RULE_SECTION_HEADING = "## jojo-code-guard 自动加载（必须严格遵守）"
+GLOBAL_RULE_SECTION_PATTERN = re.compile(
+    r"^##[ \t]+jojo-code-guard 自动加载(?:（必须严格遵守）)?[ \t]*$",
+    re.MULTILINE,
+)
+GLOBAL_RULE_NEXT_SECTION_PATTERN = re.compile(r"^#{1,2}[ \t]+", re.MULTILINE)
 
 
 def _configure_output() -> None:
@@ -1086,9 +1095,9 @@ def _check_claude_hooks(findings: list[Finding], expected_version: str | None = 
     _check_legacy_claude_hooks(findings, claude_home, settings)
 
 
-def _global_rule_source_path() -> Path:
-    """定位 Skill 内置的全局规则源文件。"""
-    return Path(__file__).resolve().parents[1] / "references" / "全局规则.md"
+def _global_rule_section_source_path() -> Path:
+    """定位 Skill 内置的自动加载节源文件。"""
+    return Path(__file__).resolve().parents[1] / "references" / "自动加载规则.md"
 
 
 def _global_rule_target_paths() -> list[Path]:
@@ -1130,16 +1139,16 @@ def _global_rule_info(data: bytes) -> str:
     return f"字节={len(data)}，BOM={bom}，换行={eol}，SHA-256={digest}"
 
 
-def _global_rule_diff(source: Path, source_data: bytes, target: Path, target_data: bytes) -> str:
-    """生成适合 doctor 报告的受限统一差异。"""
-    source_text = source_data.decode("utf-8-sig", errors="replace").splitlines(keepends=True)
-    target_text = target_data.decode("utf-8-sig", errors="replace").splitlines(keepends=True)
+def _global_rule_diff(target: Path, current_data: bytes, proposed_data: bytes) -> str:
+    """生成当前用户文件与拟议节级更新之间的受限差异。"""
+    current_text = current_data.decode("utf-8-sig", errors="replace").splitlines(keepends=True)
+    proposed_text = proposed_data.decode("utf-8-sig", errors="replace").splitlines(keepends=True)
     diff = list(
         difflib.unified_diff(
-            source_text,
-            target_text,
-            fromfile=str(source),
-            tofile=str(target),
+            current_text,
+            proposed_text,
+            fromfile=str(target),
+            tofile=f"{target}（拟议）",
             n=2,
         )
     )
@@ -1152,30 +1161,103 @@ def _global_rule_diff(source: Path, source_data: bytes, target: Path, target_dat
     return preview
 
 
-def _global_rule_content_state(target_data: bytes, source_data: bytes) -> str:
-    """判断目标是否已包含当前源规则或当前受管合并块。"""
+def _global_rule_section_text(source_data: bytes) -> str:
+    """读取并验证只包含一个当前自动加载节的内置源。"""
+    payload = source_data[3:] if source_data.startswith(b"\xef\xbb\xbf") else source_data
     try:
-        target_text = target_data.decode("utf-8-sig", errors="strict")
-        source_text = source_data.decode("utf-8-sig", errors="strict")
-    except UnicodeDecodeError:
-        return "invalid"
-    target_normal = _normalize_newlines(target_text)
-    source_normal = _normalize_newlines(source_text).rstrip("\n")
-    block = f"{GLOBAL_RULE_START_MARKER}\n{source_normal}\n{GLOBAL_RULE_END_MARKER}"
-    if block in target_normal:
-        return "merged"
-    if source_normal in target_normal:
-        return "contained"
-    return "different"
+        source_text = payload.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise RuntimeError(f"自动加载节源文件不是严格 UTF-8：{error}") from error
+    normalized = _normalize_newlines(source_text).strip("\n")
+    matches = list(GLOBAL_RULE_SECTION_PATTERN.finditer(normalized))
+    if len(matches) != 1 or matches[0].start() != 0:
+        raise RuntimeError("自动加载节源文件必须且只能包含一个受管节")
+    if matches[0].group(0) != GLOBAL_RULE_SECTION_HEADING:
+        raise RuntimeError("自动加载节源文件必须使用当前受管标题")
+    if GLOBAL_RULE_NEXT_SECTION_PATTERN.search(normalized, matches[0].end()):
+        raise RuntimeError("自动加载节源文件不能包含其他一级或二级标题")
+    return normalized
 
 
-def _check_global_rules(findings: list[Finding], mode: str | None = None) -> None:
-    """只读比较两个用户级全局规则目标。"""
-    source = _global_rule_source_path()
+def _global_rule_line_ending(text: str) -> str:
+    """读取用户全局规则的单一换行类型。"""
+    crlf = text.count("\r\n")
+    remainder = text.replace("\r\n", "")
+    lf_only = remainder.count("\n")
+    cr_only = remainder.count("\r")
+    if sum(bool(value) for value in (crlf, lf_only, cr_only)) > 1:
+        raise RuntimeError("目标使用混合换行，拒绝更新自动加载节")
+    return "\r\n" if crlf else "\r" if cr_only else "\n"
+
+
+def _global_rule_section_ranges(text: str) -> list[tuple[int, int]]:
+    """定位所有新旧 jojo-code-guard 自动加载节。"""
+    ranges: list[tuple[int, int]] = []
+    for match in GLOBAL_RULE_SECTION_PATTERN.finditer(text):
+        next_heading = GLOBAL_RULE_NEXT_SECTION_PATTERN.search(text, match.end())
+        ranges.append((match.start(), next_heading.start() if next_heading else len(text)))
+    return ranges
+
+
+def _upsert_global_rule_section(
+    target_data: bytes,
+    source_data: bytes,
+    *,
+    create_title: bool,
+) -> bytes:
+    """只新增或更新自动加载节，并保留节外用户内容。"""
+    target_bom = b"\xef\xbb\xbf" if target_data.startswith(b"\xef\xbb\xbf") else b""
+    target_payload = target_data[len(target_bom):]
+    try:
+        target_text = target_payload.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise RuntimeError(f"自动加载节同步只支持严格 UTF-8 文本：{error}") from error
+
+    line_ending = _global_rule_line_ending(target_text)
+    section = _global_rule_section_text(source_data).replace("\n", line_ending)
+    ranges = _global_rule_section_ranges(target_text)
+    if not ranges:
+        if create_title:
+            updated = GLOBAL_RULE_CREATED_TITLE + line_ending * 2 + section + line_ending
+        elif not target_text:
+            updated = section + line_ending
+        else:
+            if target_text.endswith(line_ending * 2):
+                separator = ""
+            elif target_text.endswith(("\r", "\n")):
+                separator = line_ending
+            else:
+                separator = line_ending * 2
+            updated = target_text + separator + section + line_ending
+        return target_bom + updated.encode("utf-8")
+
+    # 所有匹配节都属于 jojo-code-guard；保留首节位置并移除后续重复节
+    updated = target_text
+    for start, end in reversed(ranges[1:]):
+        updated = updated[:start] + updated[end:]
+
+    first_start, first_end = ranges[0]
+    suffix = updated[first_end:]
+    if suffix:
+        replacement = section + line_ending * 2
+    else:
+        replacement = section + (line_ending if target_text.endswith(("\r", "\n")) else "")
+    updated = updated[:first_start] + replacement + suffix
+    return target_bom + updated.encode("utf-8")
+
+
+def _check_global_rules(findings: list[Finding], preview: bool = False) -> None:
+    """只读检查两个用户级全局规则目标中的自动加载节。"""
+    source = _global_rule_section_source_path()
     if not source.is_file():
-        findings.append(Finding("BLOCKED", "全局规则", "源文件", f"不存在：{source}"))
+        findings.append(Finding("BLOCKED", "全局规则", "自动加载节源文件", f"不存在：{source}"))
         return
-    source_data = source.read_bytes()
+    try:
+        source_data = source.read_bytes()
+        _global_rule_section_text(source_data)
+    except (OSError, RuntimeError) as error:
+        findings.append(Finding("BLOCKED", "全局规则", "自动加载节源文件", str(error)))
+        return
     for target in _global_rule_target_paths():
         if target.is_symlink():
             findings.append(
@@ -1183,112 +1265,51 @@ def _check_global_rules(findings: list[Finding], mode: str | None = None) -> Non
             )
             continue
         if not target.exists():
+            proposed = _upsert_global_rule_section(b"", source_data, create_title=True)
+            message = "目标不存在；确认后将创建普通标题和 jojo-code-guard 自动加载节"
+            if preview:
+                message += "\n" + _global_rule_diff(target, b"", proposed)
             findings.append(
                 Finding(
                     "ACTION_REQUIRED",
                     "全局规则",
                     str(target),
-                    "目标不存在，可选择覆盖或合并创建",
+                    message,
                 )
             )
             continue
         try:
             target_data = target.read_bytes()
-        except OSError as error:
-            findings.append(Finding("BLOCKED", "全局规则", str(target), f"无法读取：{error}"))
+            proposed = _upsert_global_rule_section(target_data, source_data, create_title=False)
+        except (OSError, RuntimeError) as error:
+            findings.append(Finding("BLOCKED", "全局规则", str(target), str(error)))
             continue
-        if target_data == source_data:
-            findings.append(Finding("OK", "全局规则", str(target), "与内置源文件逐字节一致"))
-            continue
-        if mode == "merge":
-            try:
-                _merge_global_rule_bytes(target_data, source_data)
-            except RuntimeError as error:
-                findings.append(Finding("BLOCKED", "全局规则", str(target), str(error)))
-                continue
-        content_state = _global_rule_content_state(target_data, source_data)
-        if content_state == "merged":
-            findings.append(Finding("OK", "全局规则", str(target), "受管合并块已是最新版本"))
-            continue
-        if content_state == "contained":
-            findings.append(Finding("OK", "全局规则", str(target), "已包含当前内置规则"))
+        if target_data == proposed:
+            findings.append(Finding("OK", "全局规则", str(target), "jojo-code-guard 自动加载节已是最新内容"))
             continue
         message = (
-            f"与内置规则不同；源：{_global_rule_info(source_data)}；"
+            "jojo-code-guard 自动加载节缺失、陈旧或重复；同步只会增改该节；"
             f"目标：{_global_rule_info(target_data)}"
         )
-        if mode is not None:
-            message += "\n" + _global_rule_diff(source, source_data, target, target_data)
+        if preview:
+            message += "\n" + _global_rule_diff(target, target_data, proposed)
         findings.append(Finding("WARNING", "全局规则", str(target), message))
 
 
-def _merge_global_rule_bytes(target_data: bytes, source_data: bytes) -> bytes:
-    """在保留目标编码和换行的前提下创建或更新受管规则块。"""
-    target_bom = b"\xef\xbb\xbf" if target_data.startswith(b"\xef\xbb\xbf") else b""
-    target_payload = target_data[len(target_bom):]
-    source_payload = source_data[3:] if source_data.startswith(b"\xef\xbb\xbf") else source_data
-    try:
-        target_text = target_payload.decode("utf-8", errors="strict")
-        source_text = source_payload.decode("utf-8", errors="strict")
-    except UnicodeDecodeError as error:
-        raise RuntimeError(f"合并只支持严格 UTF-8 文本：{error}") from error
-
-    crlf = target_text.count("\r\n")
-    remainder = target_text.replace("\r\n", "")
-    lf_only = remainder.count("\n")
-    cr_only = remainder.count("\r")
-    if sum(bool(value) for value in (crlf, lf_only, cr_only)) > 1:
-        raise RuntimeError("目标使用混合换行，拒绝在合并时重写")
-    line_ending = "\r\n" if crlf else "\r" if cr_only else "\n"
-    source_normal = _normalize_newlines(source_text).rstrip("\n")
-    if GLOBAL_RULE_START_MARKER in source_normal or GLOBAL_RULE_END_MARKER in source_normal:
-        raise RuntimeError("内置规则不能包含 doctor 的受管块标记")
-    source_for_target = source_normal.replace("\n", line_ending)
-    block = (
-        f"{GLOBAL_RULE_START_MARKER}{line_ending}"
-        f"{source_for_target}{line_ending}"
-        f"{GLOBAL_RULE_END_MARKER}"
-    )
-
-    start_count = target_text.count(GLOBAL_RULE_START_MARKER)
-    end_count = target_text.count(GLOBAL_RULE_END_MARKER)
-    if start_count != end_count or start_count > 1:
-        raise RuntimeError("目标中的 jojo-code-guard 受管标记不完整或重复")
-    if start_count == 1:
-        start = target_text.index(GLOBAL_RULE_START_MARKER)
-        end_start = target_text.find(GLOBAL_RULE_END_MARKER, start + len(GLOBAL_RULE_START_MARKER))
-        if end_start < 0:
-            raise RuntimeError("目标中的 jojo-code-guard 受管标记顺序错误")
-        end = end_start + len(GLOBAL_RULE_END_MARKER)
-        merged = target_text[:start] + block + target_text[end:]
-    elif source_normal in _normalize_newlines(target_text):
-        return target_data
-    elif not target_text:
-        merged = block + line_ending
-    else:
-        if target_text.endswith(("\r", "\n")):
-            separator = line_ending
-        else:
-            separator = line_ending * 2
-        merged = target_text + separator + block + line_ending
-    return target_bom + merged.encode("utf-8")
-
-
-def _sync_global_rules(mode: str) -> list[str]:
-    """按覆盖或合并模式写入两个全局规则目标并复核结果。"""
-    if mode not in {"overwrite", "merge"}:
-        raise RuntimeError(f"不支持的全局规则同步模式：{mode}")
-    source = _global_rule_source_path()
+def _sync_global_rules() -> list[str]:
+    """只新增或更新两个用户级全局规则目标中的自动加载节。"""
+    source = _global_rule_section_source_path()
     if not source.is_file():
-        raise RuntimeError(f"Skill 内置规则文件不存在：{source}")
+        raise RuntimeError(f"自动加载节源文件不存在：{source}")
     source_data = source.read_bytes()
+    _global_rule_section_text(source_data)
     plans: list[tuple[Path, bytes, bool, bytes]] = []
     for target in _global_rule_target_paths():
         if target.is_symlink():
             raise RuntimeError(f"目标是符号链接，拒绝写入：{target}")
         existed = target.exists()
         current = target.read_bytes() if existed else b""
-        data = source_data if mode == "overwrite" else _merge_global_rule_bytes(current, source_data)
+        data = _upsert_global_rule_section(current, source_data, create_title=not existed)
         plans.append((target, data, existed, current))
 
     changed: list[str] = []
@@ -1787,8 +1808,8 @@ def main(arguments: list[str] | None = None) -> int:
     parser.add_argument("--install-tools", action="store_true", help="按平台安装缺失工具")
     parser.add_argument(
         "--sync-global-rules",
-        choices=("overwrite", "merge"),
-        help="同步全局规则：overwrite 覆盖，merge 保留原文并更新受管块",
+        action="store_true",
+        help="只新增或更新用户级全局规则中的 jojo-code-guard 自动加载节",
     )
     parser.add_argument("--yes", action="store_true", help="确认执行写入或安装操作")
     options = parser.parse_args(arguments)
@@ -1853,7 +1874,7 @@ def main(arguments: list[str] | None = None) -> int:
     _check_plugin_update(findings, expected_version)
     _check_claude_hooks(findings, expected_version=expected_version)
     _check_codex_plugin(findings, expected_version=expected_version)
-    _check_global_rules(findings, mode=options.sync_global_rules)
+    _check_global_rules(findings, preview=options.sync_global_rules)
 
     has_action = options.repair or options.install_hook or options.install_tools or options.sync_global_rules
     if has_action:
@@ -1872,13 +1893,12 @@ def main(arguments: list[str] | None = None) -> int:
                         )
                     )
             if options.sync_global_rules:
-                label = "覆盖" if options.sync_global_rules == "overwrite" else "合并"
                 findings.append(
                     Finding(
                         "ACTION_REQUIRED",
                         "全局规则",
                         "确认",
-                        f"已选择{label}模式；确认差异后添加 --yes",
+                        "已选择自动加载节同步；确认节级差异后添加 --yes",
                     )
                 )
             findings.append(
@@ -1901,10 +1921,9 @@ def main(arguments: list[str] | None = None) -> int:
 
                     findings.append(Finding("OK", "修复", "Git hook", str(install(repo))))
                 if options.sync_global_rules:
-                    changed = _sync_global_rules(options.sync_global_rules)
-                    label = "覆盖" if options.sync_global_rules == "overwrite" else "合并"
+                    changed = _sync_global_rules()
                     message = "、".join(changed) if changed else "目标已是期望内容，无需写入"
-                    findings.append(Finding("OK", "全局规则", label, message))
+                    findings.append(Finding("OK", "全局规则", "自动加载节", message))
                 if options.install_tools:
                     _install_tools(findings)
             except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
@@ -1923,8 +1942,7 @@ def main(arguments: list[str] | None = None) -> int:
             print("[2] 补齐缺失仓库配置：doctor.py --repair --yes")
             print("[3] 可选安装仓库私有 pre-commit：doctor.py --install-hook --yes")
             print("[4] 安装或更新缺失设备工具：doctor.py --install-tools --yes")
-            print("[5] 预览覆盖全局规则：doctor.py --sync-global-rules overwrite")
-            print("[6] 预览合并全局规则：doctor.py --sync-global-rules merge")
+            print("[5] 预览自动加载节差异：doctor.py --sync-global-rules")
     return 1 if any(item.level == "BLOCKED" for item in findings) else 0
 
 
