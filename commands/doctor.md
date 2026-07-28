@@ -18,8 +18,8 @@ doctor 不会自动创建；用户需要时可自行创建并写入规则。Clau
 安装、升级和启用方法，
 不复制 hook 或改写用户设置。未经用户确认，不会自动转码、批量格式化或执行外部状态变更。
 
-同时比较 `~/.claude/CLAUDE.md` 和 `~/.codex/AGENTS.md`。用户选择同步时，先分别使用
-`--sync-global-rules overwrite` 或 `--sync-global-rules merge` 预览整文件覆盖与受管块合并的差异；
-只有明确确认后才追加 `--yes`。合并必须保留目标原文，并幂等更新 jojo-code-guard 受管块。
+同时检查 `~/.claude/CLAUDE.md` 和 `~/.codex/AGENTS.md` 中的 jojo-code-guard 自动加载节。
+用户选择同步时，先使用 `--sync-global-rules` 预览节级差异，只有明确确认后才追加 `--yes`。
+已有文件只新增或更新该节，不修改标题和其他规则；文件不存在时才创建普通标题。
 
 Windows 使用 `--install-tools --yes` 安装设备工具时，如果当前终端没有管理员权限，doctor 会生成临时 PowerShell 安装脚本并通过 UAC 请求提权；请在系统提示中由使用者自行确认授权。

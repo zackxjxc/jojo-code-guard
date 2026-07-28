@@ -68,6 +68,8 @@ git add --chmod=+x hooks/session-start hooks/post-write-check
 `Stop` 会再检查一次未被工具 matcher 捕获的写入，并使用重入标记避免循环。Claude 和当前实测的
 Codex 0.142.3 都从包内 `hooks/hooks.json` 发现生命周期 Hook；Codex 的执行仍取决于客户端版本、
 Hook 功能和信任策略。
+主 Skill 加载后会自动读取同目录的 `通用规则.md`；用户级全局文件只负责引导 Skill 自动加载，
+不再承载会随 Skill 演进的通用规则。
 Hook 从业务仓库的当前工作目录启动；Codex 注入 `PLUGIN_ROOT` 和兼容变量
 `CLAUDE_PLUGIN_ROOT`，Claude 使用后者，脚本据此定位插件资源。主 Skill 会要求 AI 在修改前后检查，
 已初始化的 Git pre-commit 可在提交阶段补充机械门禁。
@@ -79,8 +81,8 @@ Hook 从业务仓库的当前工作目录启动；Codex 注入 `PLUGIN_ROOT` 和
 Codex 中会分别显示以下入口：
 
 - `jojo-code-guard`：日常自动守护编码、换行和最小 diff。
-- `jojo-code-guard:doctor`：按需执行设备、Git、仓库和全局规则诊断，可确认后覆盖或合并
-  全局规则。
+- `jojo-code-guard:doctor`：按需执行设备、Git、仓库和全局规则诊断，确认后只新增或更新
+  jojo-code-guard 自动加载节。
 - `jojo-code-guard:check-diff`：按需检查编码、换行和未提交 diff。
 - `jojo-code-guard:help`：查看功能和安全边界。
 
@@ -116,11 +118,16 @@ doctor 不会用模板覆盖仓库已有配置。为已有 `.gitattributes` 补�
 ```
 
 如果从终端直接运行脚本，必须使用客户端当前实际加载的 Skill 目录中的
-`scripts/doctor.py`，不能假定业务仓库内存在 `skills/jojo-code-guard`。如需让 Codex 每个会话都强制加载主 Skill，可先预览并确认一次全局规则合并；这不是日常命令：
+`scripts/doctor.py`，不能假定业务仓库内存在 `skills/jojo-code-guard`。如需让 Codex 每个会话都强制加载
+主 Skill，可先预览并确认一次自动加载节同步；这不是日常命令。已有全局文件只增改该节，标题和其他规则
+保持不变；目标不存在时才创建普通标题：
 
 ```text
-请使用 jojo-code-guard 的 doctor 预览 --sync-global-rules merge；确认差异后再执行同一选项并加 --yes。
+请使用 jojo-code-guard 的 doctor 预览 --sync-global-rules；确认差异后再执行同一选项并加 --yes。
 ```
+
+旧版本若曾把完整内置规则写入用户文件，本次节级同步不会删除自动加载节之外的任何内容。
+如需迁移为纯引导文件，应由用户自行审阅并清理旧规则，doctor 不代替用户判断或删除。
 
 Codex 插件安装或升级后需重新打开会话，使主 Skill Discovery 生效；若客户端显示插件 Hook 信任提示，
 首次安装或 Hook 内容发生变化的升级后审阅并确认。可用 Hook 列表中应出现来自 `hooks/hooks.json` 的

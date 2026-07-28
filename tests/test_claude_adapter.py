@@ -29,6 +29,16 @@ import sync_codex_plugin  # noqa: E402
 class ClaudeAdapterTests(unittest.TestCase):
     """验证 Claude 插件适配包和 SessionStart 调用链。"""
 
+    def test_main_skill_loads_common_rules_and_uses_section_source(self) -> None:
+        """主 Skill 应自动加载通用规则，doctor 只保留自动加载节源。"""
+        skill_root = ROOT / "skills" / "jojo-code-guard"
+        skill_text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("[通用规则.md](通用规则.md)", skill_text)
+        self.assertTrue((skill_root / "通用规则.md").is_file())
+        self.assertTrue((skill_root / "references" / "自动加载规则.md").is_file())
+        self.assertFalse((skill_root / "references" / "全局规则.md").exists())
+
     def test_sync_removes_obsolete_launchers(self) -> None:
         """同步包应完整生成并移除旧版启动器。"""
         with tempfile.TemporaryDirectory() as directory:
@@ -47,7 +57,10 @@ class ClaudeAdapterTests(unittest.TestCase):
             old_commands.mkdir(parents=True)
             (old_commands / "commit.md").write_text("old command\n", encoding="utf-8")
             references = destination / "skills" / "jojo-code-guard" / "references"
-            obsolete_documents = [references / name for name in ("兼容性改进计划.md", "生效与验收.md")]
+            obsolete_documents = [
+                references / name
+                for name in ("兼容性改进计划.md", "生效与验收.md", "全局规则.md")
+            ]
             references.mkdir(parents=True)
             for document in obsolete_documents:
                 document.write_text("obsolete\n", encoding="utf-8")
@@ -89,7 +102,10 @@ class ClaudeAdapterTests(unittest.TestCase):
             old_hooks.mkdir(parents=True)
             (old_hooks / "run-hook.sh").write_text("old launcher\n", encoding="utf-8")
             references = destination / "skills" / "jojo-code-guard" / "references"
-            obsolete_documents = [references / name for name in ("兼容性改进计划.md", "生效与验收.md")]
+            obsolete_documents = [
+                references / name
+                for name in ("兼容性改进计划.md", "生效与验收.md", "全局规则.md")
+            ]
             references.mkdir(parents=True)
             for document in obsolete_documents:
                 document.write_text("obsolete\n", encoding="utf-8")
@@ -105,6 +121,8 @@ class ClaudeAdapterTests(unittest.TestCase):
             self.assertFalse((destination / "commands" / "check-diff.md").exists())
             self.assertFalse((destination / "commands" / "commit.md").exists())
             self.assertFalse((destination / "hooks" / "run-hook.sh").exists())
+            for relative in doctor.CODEX_PLUGIN_REQUIRED_FILES:
+                self.assertTrue((destination / relative).is_file(), relative)
             self.assertTrue((destination / "hooks" / "hooks.json").is_file())
             self.assertEqual(
                 (destination / "hooks" / "hooks.json").read_bytes(),
