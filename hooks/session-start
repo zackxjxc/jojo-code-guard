@@ -74,6 +74,11 @@ mandatory_header="${mandatory_header}不得擅自降级为可忽略的参考材�
 emit_context() {
     printf '%s\n\n<JOJO_CODE_GUARD>\n' "$mandatory_header"
     cat "$SKILL_FILE"
+    local common_rules="${PLUGIN_ROOT}/skills/jojo-code-guard/通用规则.md"
+    if [ -f "$common_rules" ]; then
+        printf '\n\n--- 通用规则（已自动加载） ---\n'
+        cat "$common_rules"
+    fi
     if [ -f "${project_root}/AGENTS.md" ]; then
         printf '\n\n--- project AGENTS.md ---\n'
         cat "${project_root}/AGENTS.md"
