@@ -1874,7 +1874,8 @@ if ($failed) {{ exit 1 }}
 exit 0
 '''
     encoding = "utf-8-sig" if Path(powershell).name.lower() == "powershell.exe" else "utf-8"
-    script_path.write_text(script, encoding=encoding, newline="\n")
+    with script_path.open("w", encoding=encoding, newline="\n") as stream:
+        stream.write(script)
     argument_list = subprocess.list2cmdline(
         ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)]
     )
