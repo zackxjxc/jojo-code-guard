@@ -123,9 +123,9 @@ elif [ "$OUTPUT" = "[]" ] && [ "$STATUS" -eq 1 ]; then
     CONTEXT="jojo-code-guard: check_diff.py 返回阻断状态但没有诊断，已按阻断处理。"
 else
     if [ "$HOOK_EVENT" = "Stop" ]; then
-        CONTEXT="$(printf 'jojo-code-guard: AI 回合结束前检查结果：\n%s' "$OUTPUT")"
+        CONTEXT="$(printf 'jojo-code-guard: 回合结束前的工作区检查结果：\n%s' "$OUTPUT")"
     else
-        CONTEXT="$(printf 'jojo-code-guard: AI 写入后检查结果：\n%s' "$OUTPUT")"
+        CONTEXT="$(printf 'jojo-code-guard: 工具完成后的工作区检查结果：\n%s' "$OUTPUT")"
     fi
     if BLOCKED_RESULT="$(
         printf '%s' "$OUTPUT" | "${PYTHON[@]}" -c '
@@ -148,7 +148,11 @@ jojo-code-guard: 检查输出无法解析，已按阻断处理。"
     fi
 fi
 
-# Stop 只在阻断时要求继续修复；PostToolUse 会把所有诊断立即反馈给 AI。
+# 诊断可能覆盖会话开始前就存在的工作区内容，不能据此推断修改来源。
+CONTEXT="${CONTEXT}
+注意：结果可能包含会话开始前已有修改；已有修改不等于本轮污染。不得自动恢复、覆盖或删除来源不明或无法归因于本轮的内容。"
+
+# Stop 只在阻断时要求继续处理；PostToolUse 会把所有诊断立即反馈给 AI。
 if [ "$HOOK_EVENT" = "Stop" ] && [ "$BLOCKED" != "true" ]; then
     exit 0
 fi
@@ -166,7 +170,8 @@ if event == "Stop":
     payload = {
         "continue": True,
         "decision": "block",
-        "reason": context + "\n请修复阻断项并重新运行检查后再结束本回合。",
+        "reason": context
+        + "\n请先区分本轮修改与会话前已有内容；仅处理能可靠归因且已获授权的阻断项，重新检查后再结束本回合。",
     }
 else:
     payload = {
@@ -178,7 +183,10 @@ else:
     }
     if blocked:
         payload["decision"] = "block"
-        payload["reason"] = "写入后检查发现阻断项，请先修复污染再继续"
+        payload["reason"] = (
+            "工作区检查发现阻断项。请先区分本轮修改与会话前已有内容；"
+            "不得自动恢复、覆盖或删除来源不明的内容。"
+        )
 print(json.dumps(payload, ensure_ascii=False))
 '; then
     echo "jojo-code-guard: failed to build structured ${HOOK_EVENT} output." >&2

@@ -2,6 +2,15 @@
 # 会话入口：注入自动守护规则和当前项目 AGENTS.md。
 set -euo pipefail
 
+absolute_directory() {
+    local directory="$1"
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -am "$directory"
+    else
+        (cd "$directory" 2>/dev/null && pwd)
+    fi
+}
+
 plugin_root="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-}}}"
 if [ -n "$plugin_root" ]; then
     PLUGIN_ROOT="$plugin_root"
@@ -11,6 +20,9 @@ else
 fi
 # 客户端在 Windows 可能传入反斜杠路径，先转换为 Bash 可识别的形式
 PLUGIN_ROOT="${PLUGIN_ROOT//\\\\//}"
+if resolved_plugin_root="$(absolute_directory "$PLUGIN_ROOT" 2>/dev/null)"; then
+    PLUGIN_ROOT="$resolved_plugin_root"
+fi
 SKILL_FILE="${PLUGIN_ROOT}/skills/jojo-code-guard/SKILL.md"
 
 select_python() {
@@ -66,26 +78,30 @@ project_root="${project_root//\\\\//}"
 if git_root="$(git -C "$project_root" rev-parse --show-toplevel 2>/dev/null)"; then
     project_root="$git_root"
 fi
-# 强制守护规则——遵守系统、用户和项目规则的优先级顺序
-mandatory_header="【强制守护规则】以下是 jojo-code-guard 的强制工作约束，"
-mandatory_header="${mandatory_header}在不违反更高优先级指令的前提下适用于所有任务。"
-mandatory_header="${mandatory_header}不得擅自降级为可忽略的参考材料。"
+if resolved_project_root="$(absolute_directory "$project_root" 2>/dev/null)"; then
+    project_root="$resolved_project_root"
+fi
+common_rules="${PLUGIN_ROOT}/skills/jojo-code-guard/通用规则.md"
+project_rules="${project_root}/AGENTS.md"
 
-emit_context() {
-    printf '%s\n\n<JOJO_CODE_GUARD>\n' "$mandatory_header"
-    cat "$SKILL_FILE"
-    local common_rules="${PLUGIN_ROOT}/skills/jojo-code-guard/通用规则.md"
+# 只注入短加载指令和绝对路径，避免客户端把完整规则溢出到临时文件或截断。
+emit_load_instruction() {
+    printf '%s\n' '<JOJO_CODE_GUARD_LOAD_INSTRUCTION>'
+    printf '%s\n' '在生成回复或修改文件前，必须使用可用的文件读取能力依次完整读取并遵守下列文件。'
+    printf '%s\n' '路径提示不等于已加载文件内容，不得仅凭本段摘要继续。'
+    printf '1. 必需 Skill：%s\n' "$SKILL_FILE"
     if [ -f "$common_rules" ]; then
-        printf '\n\n--- 通用规则（已自动加载） ---\n'
-        cat "$common_rules"
+        printf '2. 通用规则：%s\n' "$common_rules"
     fi
-    if [ -f "${project_root}/AGENTS.md" ]; then
-        printf '\n\n--- project AGENTS.md ---\n'
-        cat "${project_root}/AGENTS.md"
+    if [ -f "$project_rules" ]; then
+        printf '3. 当前项目规则：%s\n' "$project_rules"
     fi
-    printf '\n</JOJO_CODE_GUARD>\n'
+    printf '%s\n' '规则优先级：系统/用户明确要求 > 项目规则 > Skill 及其引用规则。'
+    printf '%s\n' '若任一列出的文件无法完整读取，立即暂停文件修改并向用户报告。'
+    printf '%s\n' '已有修改不等于本轮污染；不得自动恢复、覆盖或删除来源不明的内容。'
+    printf '%s\n' '</JOJO_CODE_GUARD_LOAD_INSTRUCTION>'
 }
 
 # 结构化 additionalContext 明确标记事件边界，并保留普通 stdout 兼容回退。
-context="$(emit_context)"
+context="$(emit_load_instruction)"
 emit_context_payload "$context"

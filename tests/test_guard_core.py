@@ -15,10 +15,13 @@ sys.path.insert(0, str(ROOT / "skills" / "jojo-code-guard" / "scripts"))
 
 from guard_core import (  # noqa: E402
     check_changes,
+    check_diff_size,
     check_filemode_changes,
     check_new,
+    check_tracked_revision,
     compare_existing,
     inspect_bytes,
+    parse_migration_allowances,
 )
 
 
@@ -255,6 +258,173 @@ class TextPolicyTests(unittest.TestCase):
         diagnostics = check_new("notes.txt", "标题\ufeff\n".encode("utf-8"))
 
         self.assertIn("REPEATED_BOM", {item.code for item in diagnostics})
+
+    def test_new_powershell_rejects_embedded_bom(self) -> None:
+        """PowerShell 专用分支也不能漏掉正文 U+FEFF。"""
+        diagnostics = check_new("script.ps1", "Write-Host 'ok'\ufeff\n".encode("utf-8"))
+
+        self.assertIn("REPEATED_BOM", {item.code for item in diagnostics})
+
+    def test_literal_pathspec_prevents_special_path_blob_substitution(self) -> None:
+        """Git pathspec 魔法文件名必须读取自身 blob，不能借另一文件绕过检查。"""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "core.protectNTFS", "false"], cwd=repo, check=True)
+            entries = (
+                (":(exclude)aaa.txt", b"safe\n"),
+                (":(exclude)zzz.txt", "中文".encode("cp936")),
+            )
+            for path, data in entries:
+                oid = subprocess.run(
+                    ["git", "hash-object", "-w", "--stdin"],
+                    cwd=repo,
+                    input=data,
+                    stdout=subprocess.PIPE,
+                    check=True,
+                ).stdout.decode("ascii").strip()
+                subprocess.run(
+                    ["git", "update-index", "--add", "--cacheinfo", f"100644,{oid},{path}"],
+                    cwd=repo,
+                    check=True,
+                )
+
+            diagnostics = check_changes(repo, staged=True)
+
+        bad = [item for item in diagnostics if item.path == ":(exclude)zzz.txt"]
+        self.assertIn("NEW_ENCODING", {item.code for item in bad})
+
+    def test_large_unicode_diff_is_not_misclassified_as_format_only(self) -> None:
+        """中文路径必须从 numstat -z 原样解析并用于 literal pathspec。"""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            path = repo / "中文.txt"
+            path.write_text("".join(f"line {index:03d} keep\n" for index in range(300)), encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=jojo-test", "-c", "user.email=jojo@example.com", "commit", "-qm", "base"],
+                cwd=repo,
+                check=True,
+            )
+            lines = path.read_text(encoding="utf-8").splitlines()
+            for index in range(110):
+                lines[index] = f"line {index:03d} changed"
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+
+            diagnostics = check_diff_size(repo, staged=True, block_format_only=True)
+
+        result = {item.code: item for item in diagnostics}
+        self.assertNotIn("FORMAT_ONLY_LARGE_DIFF", result)
+        self.assertEqual(result["LARGE_DIFF"].path, "中文.txt")
+
+    def test_large_modified_rename_is_not_misclassified_as_format_only(self) -> None:
+        """numstat -z 的 rename 三段记录必须选择目标路径检查。"""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            old = repo / "old.txt"
+            old.write_text("".join(f"line {index:03d} keep\n" for index in range(300)), encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=jojo-test", "-c", "user.email=jojo@example.com", "commit", "-qm", "base"],
+                cwd=repo,
+                check=True,
+            )
+            new = repo / "new.txt"
+            old.rename(new)
+            lines = new.read_text(encoding="utf-8").splitlines()
+            for index in range(110):
+                lines[index] = f"line {index:03d} changed"
+            new.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+
+            diagnostics = check_diff_size(repo, staged=True, block_format_only=True)
+
+        result = {item.code: item for item in diagnostics}
+        self.assertNotIn("FORMAT_ONLY_LARGE_DIFF", result)
+        self.assertEqual(result["LARGE_DIFF"].path, "new.txt")
+
+    def test_staged_check_does_not_scan_unrelated_unstaged_batch(self) -> None:
+        """staged-only 不能被无关的未暂存批处理修改阻断。"""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            (repo / ".gitattributes").write_text("* -text\n*.bat text eol=crlf\n", encoding="utf-8")
+            (repo / "build.bat").write_bytes(b"@echo off\r\necho base\r\n")
+            (repo / "note.txt").write_text("base\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=jojo-test", "-c", "user.email=jojo@example.com", "commit", "-qm", "base"],
+                cwd=repo,
+                check=True,
+            )
+            (repo / "build.bat").write_bytes(b"@echo off\necho unstaged\n")
+            (repo / "note.txt").write_text("staged\n", encoding="utf-8")
+            subprocess.run(["git", "add", "note.txt"], cwd=repo, check=True)
+
+            diagnostics = check_changes(repo, staged=True)
+
+        self.assertNotIn("build.bat", {item.path for item in diagnostics})
+
+    def test_known_binary_is_skipped_before_bounded_read(self) -> None:
+        """明确二进制后缀不应因大小上限被读入或阻断。"""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            (repo / "image.png").write_bytes(b"large-binary")
+
+            diagnostics = check_changes(repo, staged=False, max_file_bytes=1)
+
+        self.assertNotIn("image.png", {item.path for item in diagnostics})
+
+    def test_large_text_gets_bounded_diagnostic(self) -> None:
+        """候选文本超过上限时应阻断并给诊断，而不是无界读取。"""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            (repo / "large.txt").write_bytes(b"too-large\n")
+
+            diagnostics = check_changes(repo, staged=False, max_file_bytes=4)
+
+        result = {item.code: item for item in diagnostics}
+        self.assertEqual(result["FILE_TOO_LARGE"].path, "large.txt")
+
+    def test_tracked_revision_scans_encoding_and_whitespace(self) -> None:
+        """clean checkout CI 仍应扫描提交树中的 CP936 与尾随空白。"""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=repo, check=True)
+            (repo / "legacy.txt").write_bytes("中文\n".encode("cp936"))
+            (repo / "space.py").write_bytes(b"value = 1  \n")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=jojo-test", "-c", "user.email=jojo@example.com", "commit", "-qm", "base"],
+                cwd=repo,
+                check=True,
+            )
+
+            diagnostics = check_tracked_revision(repo, "HEAD")
+
+        by_path = {(item.path, item.code) for item in diagnostics}
+        self.assertIn(("legacy.txt", "NEW_ENCODING"), by_path)
+        self.assertIn(("space.py", "TRACKED_WHITESPACE"), by_path)
+
+    def test_path_scoped_migration_allowance_is_exact_and_explicit(self) -> None:
+        """编码迁移只在 kind 和仓库相对路径都匹配时放行。"""
+        values = parse_migration_allowances(["encoding:legacy.txt"])
+        old_data = "中文\n".encode("cp936")
+        new_data = "中文\n".encode("utf-8")
+
+        strict = compare_existing("legacy.txt", old_data, new_data)
+        wrong_path = compare_existing("legacy.txt", old_data, new_data, values.get("other.txt", ()))
+        allowed = compare_existing("legacy.txt", old_data, new_data, values["legacy.txt"])
+
+        self.assertIn("ENCODING_CHANGED", {item.code for item in strict})
+        self.assertIn("ENCODING_CHANGED", {item.code for item in wrong_path})
+        self.assertFalse(any(item.level == "BLOCKED" for item in allowed), allowed)
 
     def test_unborn_repo_is_strict_by_default(self) -> None:
         """首个提交默认也必须阻断错误编码和换行。"""

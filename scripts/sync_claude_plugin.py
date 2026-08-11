@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""从发布仓库根目录生成完整的 Claude Code 插件适配包。"""
+"""从发布仓库根目录原子生成完整的 Claude Code 插件适配包。"""
 
 from __future__ import annotations
 
@@ -7,42 +7,27 @@ import os
 import pathlib
 import shutil
 import stat
+import tempfile
+import uuid
 
 
 def _copy(source: pathlib.Path, destination: pathlib.Path, executable: bool = False) -> None:
     """复制一个发布资源，并在类 Unix 系统保留可执行权限。"""
     if not source.is_file():
         raise FileNotFoundError(f"发布资源不存在：{source}")
-    if source.resolve() == destination.resolve():
-        return
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination)
     if executable and os.name != "nt":
         destination.chmod(destination.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def _remove_obsolete_resources(root: pathlib.Path, destination: pathlib.Path) -> None:
-    """从生成目录移除不再发布的旧版入口。"""
-    if root.resolve() == destination.resolve():
-        return
-    for name in ("run-hook.cmd", "run-hook.sh"):
-        path = destination / "hooks" / name
-        if path.is_file() or path.is_symlink():
-            path.unlink()
-    obsolete_command = destination / "commands" / "commit.md"
-    if obsolete_command.is_file() or obsolete_command.is_symlink():
-        obsolete_command.unlink()
-    old_skill = destination / "skills" / "jojo-code-guard-sync-global-rules"
-    if old_skill.is_dir():
-        shutil.rmtree(old_skill)
-    removed_commit_skill = destination / "skills" / "jojo-code-guard-commit"
-    if removed_commit_skill.is_dir():
-        shutil.rmtree(removed_commit_skill)
-    references = destination / "skills" / "jojo-code-guard" / "references"
-    for name in ("兼容性改进计划.md", "生效与验收.md", "全局规则.md"):
-        obsolete_document = references / name
-        if obsolete_document.is_file() or obsolete_document.is_symlink():
-            obsolete_document.unlink()
+def _copy_tree(source: pathlib.Path, destination: pathlib.Path) -> None:
+    """复制一棵发布目录，并排除解释器缓存。"""
+    shutil.copytree(
+        source,
+        destination,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
 
 
 def _validate_adapter(destination: pathlib.Path) -> None:
@@ -53,6 +38,7 @@ def _validate_adapter(destination: pathlib.Path) -> None:
         destination / "hooks" / "hooks.json",
         destination / "hooks" / "session-start",
         destination / "hooks" / "post-write-check",
+        destination / "hooks" / "run-hook.cmd",
         destination / "skills" / "jojo-code-guard" / "SKILL.md",
         destination / "skills" / "jojo-code-guard" / "通用规则.md",
         destination / "skills" / "jojo-code-guard" / "references" / "自动加载规则.md",
@@ -62,13 +48,53 @@ def _validate_adapter(destination: pathlib.Path) -> None:
         raise FileNotFoundError("Claude 适配包缺少资源：" + ", ".join(missing))
 
 
+def _replace_directory(staging: pathlib.Path, destination: pathlib.Path) -> None:
+    """用已校验的同盘暂存目录替换旧安装；失败时恢复旧目录。"""
+    if destination.is_symlink():
+        raise RuntimeError(f"拒绝覆盖符号链接安装目录：{destination}")
+    if destination.exists() and not destination.is_dir():
+        raise RuntimeError(f"拒绝覆盖非目录安装目标：{destination}")
+
+    backup: pathlib.Path | None = None
+    try:
+        if destination.exists():
+            backup = destination.parent / f".{destination.name}.backup-{uuid.uuid4().hex}"
+            os.replace(destination, backup)
+        os.replace(staging, destination)
+    except Exception:
+        if backup is not None and backup.exists() and not destination.exists():
+            os.replace(backup, destination)
+        raise
+    else:
+        if backup is not None:
+            shutil.rmtree(backup)
+
+
+def _build_adapter(root: pathlib.Path, staging: pathlib.Path) -> None:
+    """在空暂存目录内构建完整适配包。"""
+    source_skills = root / "skills"
+    source_hooks = root / "hooks"
+    source_commands = root / "commands"
+    for source in (source_skills, source_hooks, source_commands):
+        if not source.is_dir():
+            raise FileNotFoundError(f"发布目录不存在：{source}")
+
+    _copy(root / ".claude-plugin" / "plugin.json", staging / ".claude-plugin" / "plugin.json")
+    _copy(root / ".claude-plugin" / "marketplace.json", staging / ".claude-plugin" / "marketplace.json")
+    _copy_tree(source_hooks, staging / "hooks")
+    _copy_tree(source_commands, staging / "commands")
+    _copy_tree(source_skills, staging / "skills")
+
+    if os.name != "nt":
+        for name in ("session-start", "post-write-check"):
+            path = staging / "hooks" / name
+            path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    _validate_adapter(staging)
+
+
 def main() -> int:
     """从空目录重建 Claude manifest、命令、hook 和共享 Skill。"""
     root = pathlib.Path(__file__).resolve().parents[1]
-    source_skills = root / "skills"
-    if not source_skills.is_dir():
-        raise FileNotFoundError(f"Skill 源目录不存在：{source_skills}")
-
     codex_home = pathlib.Path(
         os.environ.get("CODEX_HOME", str(pathlib.Path.home() / ".codex"))
     ).expanduser()
@@ -79,30 +105,21 @@ def main() -> int:
         )
     ).expanduser()
 
-    files = [
-        (root / ".claude-plugin" / "plugin.json", destination / ".claude-plugin" / "plugin.json", False),
-        (root / ".claude-plugin" / "marketplace.json", destination / ".claude-plugin" / "marketplace.json", False),
-        (root / "hooks" / "hooks.json", destination / "hooks" / "hooks.json", False),
-        (root / "hooks" / "session-start", destination / "hooks" / "session-start", True),
-        (root / "hooks" / "post-write-check", destination / "hooks" / "post-write-check", True),
-    ]
-    for source, target, executable in files:
-        _copy(source, target, executable=executable)
+    if destination.resolve() == root.resolve():
+        _validate_adapter(root)
+        print(f"Claude adapter already uses source tree: {destination}")
+        return 0
 
-    command_root = root / "commands"
-    for source in sorted(command_root.glob("*.md")):
-        _copy(source, destination / "commands" / source.name)
-
-    skill_destination = destination / "skills"
-    if source_skills.resolve() != skill_destination.resolve():
-        shutil.copytree(
-            source_skills,
-            skill_destination,
-            dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-        )
-    _remove_obsolete_resources(root, destination)
-    _validate_adapter(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = pathlib.Path(
+        tempfile.mkdtemp(prefix=f".{destination.name}.sync-", dir=destination.parent)
+    )
+    try:
+        _build_adapter(root, staging)
+        _replace_directory(staging, destination)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
     print(f"Synced Claude adapter: {destination}")
     return 0
 

@@ -30,6 +30,7 @@ fi
 echo "jojo-code-guard: Python 3 is required." >&2
 exit 2
 """
+KNOWN_WRAPPERS = frozenset({WRAPPER.encode("utf-8")})
 
 
 def _configure_output() -> None:
@@ -39,44 +40,71 @@ def _configure_output() -> None:
             stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-def _config(repo: pathlib.Path, scope: str, key: str) -> str:
-    """读取指定作用域的 Git 配置。"""
+def _run_git(repo: pathlib.Path, arguments: list[str]) -> subprocess.CompletedProcess[bytes]:
+    """执行 Git 命令并保留返回码与原始输出。"""
     result = subprocess.run(
-        ["git", "config", scope, "--get", key],
+        ["git", *arguments],
         cwd=str(repo),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
     )
-    return result.stdout.decode("utf-8", errors="replace").strip() if result.returncode == 0 else ""
+    return result
 
 
-def _default_hooks_dir(repo: pathlib.Path) -> pathlib.Path:
-    """定位不受全局 hooksPath 影响的仓库私有 hooks 目录。"""
-    result = subprocess.run(
-        ["git", "rev-parse", "--git-common-dir"],
-        cwd=str(repo),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
+def _git_path(repo: pathlib.Path, arguments: list[str], description: str) -> pathlib.Path:
+    """读取 Git 返回的路径，并按仓库根目录解析相对值。"""
+    result = _run_git(repo, arguments)
     if result.returncode != 0:
-        raise RuntimeError("无法定位 Git common directory")
-    common = pathlib.Path(os.fsdecode(result.stdout.strip()))
-    if not common.is_absolute():
-        common = (repo / common).resolve()
-    return common / "hooks"
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"无法定位 {description}" + (f"：{detail}" if detail else ""))
+    raw = result.stdout.rstrip(b"\r\n")
+    if not raw:
+        raise RuntimeError(f"Git 返回了空的 {description}")
+    path = pathlib.Path(os.fsdecode(raw))
+    return path.resolve() if path.is_absolute() else (repo / path).resolve()
 
 
-def install(repo: pathlib.Path, force_owned: bool = False) -> pathlib.Path:
-    """安装或更新自有 hook，绝不覆盖第三方 hook。"""
-    local_hooks = _config(repo, "--local", "core.hooksPath")
-    global_hooks = _config(repo, "--global", "core.hooksPath")
-    if local_hooks or global_hooks:
+def _effective_hooks_path_setting(repo: pathlib.Path) -> str | None:
+    """读取最终生效的 core.hooksPath，并尽量保留来源信息。"""
+    effective = _run_git(repo, ["config", "--get", "core.hooksPath"])
+    if effective.returncode == 1:
+        return None
+    if effective.returncode != 0:
+        detail = effective.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError("无法读取有效 core.hooksPath" + (f"：{detail}" if detail else ""))
+
+    value = effective.stdout.decode("utf-8", errors="replace").rstrip("\r\n")
+    origin = _run_git(repo, ["config", "--show-origin", "--show-scope", "--get", "core.hooksPath"])
+    if origin.returncode == 0:
+        detail = origin.stdout.decode("utf-8", errors="replace").strip()
+        if detail:
+            return detail
+    return f"core.hooksPath={value!r}"
+
+
+def _effective_hooks_dir(repo: pathlib.Path) -> pathlib.Path:
+    """定位 Git 实际使用的 hooks 目录，并拒绝接管已有 hooksPath 链。"""
+    hooks_dir = _git_path(repo, ["rev-parse", "--git-path", "hooks"], "有效 hooks 目录")
+    configured = _effective_hooks_path_setting(repo)
+    if configured is not None:
         raise RuntimeError(
-            "检测到 core.hooksPath；为避免覆盖现有 hook 链，请先人工确认并将 jojo_hook_check.py 接入该链"
+            "检测到有效 core.hooksPath；为避免覆盖现有 hook 链，不自动安装。"
+            f"来源和值：{configured}；Git 当前 hooks 目录：{hooks_dir}"
         )
-    hooks_dir = _default_hooks_dir(repo)
+
+    common_dir = _git_path(repo, ["rev-parse", "--git-common-dir"], "Git common directory")
+    expected = (common_dir / "hooks").resolve()
+    if hooks_dir != expected:
+        raise RuntimeError(
+            f"Git 报告的 hooks 目录与默认 common-dir 语义不一致：{hooks_dir} != {expected}"
+        )
+    return hooks_dir
+
+
+def install(repo: pathlib.Path) -> pathlib.Path:
+    """安装或更新自有 hook，绝不覆盖第三方 hook。"""
+    hooks_dir = _effective_hooks_dir(repo)
     hooks_dir.mkdir(parents=True, exist_ok=True)
     pre_commit = hooks_dir / "pre-commit"
     source_dir = pathlib.Path(__file__).resolve().parent
@@ -84,15 +112,17 @@ def install(repo: pathlib.Path, force_owned: bool = False) -> pathlib.Path:
         "jojo_guard_core.py": source_dir / "guard_core.py",
         "jojo_hook_check.py": source_dir / "hook_check.py",
     }
-    if pre_commit.exists():
-        existing = pre_commit.read_text(encoding="utf-8", errors="replace")
-        if MARKER not in existing:
+    if pre_commit.exists() or pre_commit.is_symlink():
+        if pre_commit.is_symlink():
+            raise RuntimeError(f"已有符号链接 pre-commit，未覆盖：{pre_commit}")
+        existing = pre_commit.read_bytes()
+        if existing not in KNOWN_WRAPPERS:
             raise RuntimeError(f"已有第三方 pre-commit，未覆盖：{pre_commit}")
         copies_current = all(
             (hooks_dir / name).is_file() and (hooks_dir / name).read_bytes() == source.read_bytes()
             for name, source in source_files.items()
         )
-        if not force_owned and existing == WRAPPER and copies_current:
+        if copies_current:
             return pre_commit
 
     for name, source in source_files.items():
@@ -113,7 +143,7 @@ def main(arguments: list[str] | None = None) -> int:
         print("ACTION_REQUIRED  安装会写入 .git/hooks；确认后重新运行并添加 --yes")
         return 3
     try:
-        path = install(find_repo(options.repo), force_owned=True)
+        path = install(find_repo(options.repo))
     except (OSError, RuntimeError) as error:
         print(f"BLOCKED  {error}", file=sys.stderr)
         return 2

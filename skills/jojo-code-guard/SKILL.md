@@ -40,7 +40,7 @@ Git hook 是可选的最终机械门禁，但不能替代 AI 的最小改动规�
    该检查也会发现已有文件权限位或文件类型的意外变化。
 4. 发现 `BLOCKED`、整文件变化或未授权文件变化时，不继续交付或提交，先修复并重新检查本轮污染。
 
-默认把所有仓库视为老项目：现有文件保真，新增文件使用 UTF-8 无 BOM；`.bat/.cmd` 必须使用 UTF-8 无 BOM + CRLF。`.gitattributes` 默认使用 `* -text`，并使用 `*.bat text eol=crlf` 和 `*.cmd text eol=crlf` 保证 Git 检出结果；这两条规则只覆盖批处理文件的全局 `* -text`。新建 `.gitattributes` 时默认加入三条规则。已有仓库补充批处理规则前必须说明后续 checkout、reset 或重新暂存可能把现有 `.bat/.cmd` 转换为 CRLF；不自动执行 `git add --renormalize`，不批量改写脚本，不修改暂存区。`.ps1` 默认按 PowerShell 7/Unix 使用 UTF-8 无 BOM + LF；若明确由 Windows PowerShell 5.1 执行且含中文，用户可自行创建项目规则文件记录 UTF-8 BOM 例外。用户明确提出的规则优先，但全局配置、批量迁移、安装软件等高影响操作必须先说明范围并确认。
+默认把所有仓库视为老项目：现有文件保真，新增文件使用 UTF-8 无 BOM；`.bat/.cmd` 必须使用 UTF-8 无 BOM + CRLF。`.gitattributes` 默认使用 `* -text`，并使用 `*.bat text eol=crlf` 和 `*.cmd text eol=crlf` 保证 Git 检出结果；这两条规则只覆盖批处理文件的全局 `* -text`。新建 `.gitattributes` 时默认加入三条规则。已有仓库补充批处理规则前必须说明后续 checkout、reset 或重新暂存可能把现有 `.bat/.cmd` 转换为 CRLF；不自动执行 `git add --renormalize`，不批量改写脚本，不修改暂存区。`.ps1` 默认按 PowerShell 7/Unix 使用 UTF-8 无 BOM + LF；若明确由 Windows PowerShell 5.1 执行且含中文，用户可自行创建项目规则文件记录 UTF-8 BOM 例外。Visual Studio/MSVC 的 `.rc/.rc2` 新文件是明确例外，使用 UTF-8 BOM + LF，避免旧资源工具链误判中文。用户明确提出的规则优先，但全局配置、批量迁移、安装软件等高影响操作必须先说明范围并确认。
 
 `.vscode/settings.json` 是可选的编辑器提示，不是项目编码规则的唯一来源：`.editorconfig` 和 `.gitattributes` 才是共享规则。
 检查仓库时，如果存在该文件，核对 `files.encoding`、`files.eol`、`files.autoGuessEncoding`、`editor.formatOnSave`、
@@ -94,6 +94,9 @@ python "<jojo-code-guard>/scripts/check_diff.py"
 无 HEAD 的新仓库默认严格检查首个提交；明确导入已有老项目基线时，才在 `check_diff.py` 上使用
 `--allow-initial-baseline`，该选项只放宽可解释的新增文件编码、BOM、换行和末尾换行属性；不可解码、二进制和替换字符仍阻断。若确需让本地
 `pre-commit` 接受这次一次性导入，可显式设置 `JOJO_CODE_GUARD_ALLOW_INITIAL_BASELINE=1`；Hook 会留下警告。
+用户明确授权单文件迁移时，可重复传入精确路径
+`--allow-migration encoding:path/to/file`、`bom:path/to/file` 或 `eol:path/to/file`；不支持 glob，未列出的属性
+仍严格阻断。Git Hook 的等价入口是 JSON 数组环境变量 `JOJO_CODE_GUARD_ALLOW_MIGRATIONS`。
 缺少仓库配置时，先展示将创建的文件；得到确认后可执行 `doctor.py --repair --yes`，需要 hook 时再加
 `--install-hook`。`AGENTS.md` 是可选项目规则文件，doctor 不会自动创建；用户需要时可自行创建并写入规则。
 Claude/Codex 自动加载由各自插件管理器维护；doctor 只读检查远端发布版本、精确插件 ID、缓存版本、启用状态、Hook 功能和
@@ -114,6 +117,8 @@ Claude 和当前实测的 Codex 0.142.3 都从 `hooks/hooks.json` 发现 `Sessio
 `SessionStart` 通过结构化上下文注入守护规则；生命周期 Hook 是否执行仍取决于客户端版本、功能开关、
 信任状态和策略，不能当作必然能力。Hook 从业务仓库的当前工作目录启动，Codex 注入 `PLUGIN_ROOT` 和
 兼容变量 `CLAUDE_PLUGIN_ROOT`，Claude 使用后者；命令通过这些变量定位插件脚本，不能依赖业务仓库中的相对路径。
+Hook 清单的 `timeout` 单位是秒；当前 SessionStart 为 10 秒，PostToolUse/Stop 为 60 秒。需要 3000 毫秒时
+应配置为 `3`，不能配置为 `3000`。
 同步脚本会复制 `hooks/` 资源。
 若客户端不执行生命周期 Hook，仍回退到主 Skill 指导的检查路径。
 `sync_claude_plugin.py` 和 `sync_codex_plugin.py` 可从本目录重建两个适配包。GitHub 安装通过仓库内的 marketplace 清单完成；

@@ -2,6 +2,16 @@
 
 本文件记录 jojo-code-guard 的重要变更。
 
+## [0.2.13] - 2026-08-11
+
+- 修复 Git 特殊路径、Unicode 重命名、大文件读取和 staged-only 批处理误扫，并增加精确单文件迁移许可。
+- CI 改为检查实际提交范围和完整 HEAD 树，避免 clean checkout 上的空检查。
+- 生命周期 Hook 覆盖 fork 会话，显式使用秒级超时，并增加不依赖 Windows PATH 的 Git Bash 启动器。
+- SessionStart 改为短加载指令，避免超过上下文上限；PostToolUse/Stop 不再把会话前修改归因于本轮。
+- Git hook 安装器拒绝 marker 碰撞、符号链接和任意作用域的 `core.hooksPath`，不再覆盖第三方 hook。
+- doctor 增加关键资源 SHA-256 完整性验证，修复 CRLF 配置写入、CODEX_HOME、Git 失败误报、UAC 等待与工具误升级。
+- Claude/Codex 同步器改为先完整构建校验再替换，自动清理旧版托管残留。
+
 ## [0.2.12] - 2026-07-28
 
 - SessionStart 直接将通用规则注入上下文，避免 AI 依赖相对路径执行额外读取动作。
