@@ -15,7 +15,11 @@ from guard_core import (
     check_conversion_policy,
     check_diff_size,
     check_filemode_changes,
+    check_tracked_revision,
     find_repo,
+    merge_migration_allowances,
+    migration_allowances_from_environment,
+    parse_migration_allowances,
 )
 
 
@@ -81,38 +85,64 @@ def main(arguments: list[str] | None = None) -> int:
     _configure_output()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=".", help="Git 工作树内的路径")
-    parser.add_argument("--staged-only", action="store_true", help="只检查暂存区")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--staged-only", action="store_true", help="只检查暂存区")
+    mode.add_argument(
+        "--tracked-revision",
+        metavar="REVISION",
+        help="扫描指定提交的全部 tracked 普通 blob，适用于 clean checkout CI",
+    )
     parser.add_argument(
         "--allow-initial-baseline",
         action="store_true",
         help="允许无 HEAD 仓库保留历史编码/EOL属性（不可解码、二进制和替换字符仍阻断）",
     )
+    parser.add_argument(
+        "--allow-migration",
+        action="append",
+        default=[],
+        metavar="KIND:PATH",
+        help="精确允许单一路径的 encoding、bom 或 eol 迁移；可重复指定",
+    )
     parser.add_argument("--json", action="store_true", help="输出 JSON")
     options = parser.parse_args(arguments)
     try:
         repo = find_repo(options.repo)
-        diagnostics = check_changes(
-            repo,
-            staged=True,
-            allow_initial_baseline=options.allow_initial_baseline,
+        migration_allowances = merge_migration_allowances(
+            migration_allowances_from_environment(),
+            parse_migration_allowances(options.allow_migration),
         )
-        diagnostics.extend(check_conversion_policy(repo, staged=True))
-        diagnostics.extend(check_diff_size(repo, staged=True))
-        diagnostics.extend(check_filemode_changes(repo, staged=True))
-        diagnostics.extend(_whitespace_diagnostics(repo, staged=True))
-        if not options.staged_only:
-            diagnostics.extend(
-                check_changes(
-                    repo,
-                    staged=False,
-                    allow_initial_baseline=options.allow_initial_baseline,
-                )
+        if options.tracked_revision:
+            diagnostics = check_tracked_revision(
+                repo,
+                options.tracked_revision,
+                migration_allowances=migration_allowances,
             )
-            diagnostics.extend(check_conversion_policy(repo, staged=False))
-            diagnostics.extend(check_diff_size(repo, staged=False))
-            diagnostics.extend(check_filemode_changes(repo, staged=False))
-            diagnostics.extend(_whitespace_diagnostics(repo, staged=False))
-    except RuntimeError as error:
+        else:
+            diagnostics = check_changes(
+                repo,
+                staged=True,
+                allow_initial_baseline=options.allow_initial_baseline,
+                migration_allowances=migration_allowances,
+            )
+            diagnostics.extend(check_conversion_policy(repo, staged=True))
+            diagnostics.extend(check_diff_size(repo, staged=True))
+            diagnostics.extend(check_filemode_changes(repo, staged=True))
+            diagnostics.extend(_whitespace_diagnostics(repo, staged=True))
+            if not options.staged_only:
+                diagnostics.extend(
+                    check_changes(
+                        repo,
+                        staged=False,
+                        allow_initial_baseline=options.allow_initial_baseline,
+                        migration_allowances=migration_allowances,
+                    )
+                )
+                diagnostics.extend(check_conversion_policy(repo, staged=False))
+                diagnostics.extend(check_diff_size(repo, staged=False))
+                diagnostics.extend(check_filemode_changes(repo, staged=False))
+                diagnostics.extend(_whitespace_diagnostics(repo, staged=False))
+    except (RuntimeError, ValueError) as error:
         print(f"BLOCKED  {error}", file=sys.stderr)
         return 2
 

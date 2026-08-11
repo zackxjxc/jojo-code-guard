@@ -4,7 +4,7 @@ Skill 自动加载后，日常修改无需输入命令。若项目根目录存�
 
 如果 Git 的 `core.autocrlf` 或 `core.eol` 会自动转换工作区，检查会先告警，暂存检查会阻止提交；先在仓库 local 配置中关闭转换并重新确认 diff。Git 索引无法保存历史工作区的原始换行，工具不会猜测或批量修复。
 
-新增 `.ps1` 默认使用 UTF-8 无 BOM + LF，适用于 PowerShell 7 和 Unix；明确使用 Windows PowerShell 5.1 且包含中文时，用户可自行在项目规则文件中记录 UTF-8 BOM 例外。`.bat/.cmd` 必须使用 UTF-8 无 BOM + CRLF，并用 `*.bat text eol=crlf` 和 `*.cmd text eol=crlf` 保证 Git 检出结果。这两条规则只覆盖批处理文件的全局 `* -text`，其他历史文件仍保留原始字节。新建 `.gitattributes` 时默认加入这些规则；已有仓库补充规则时，后续 checkout、reset 或重新暂存可能把现有批处理转换为 CRLF。Skill 不自动执行 `git add --renormalize`，不批量改写已有脚本，也不修改暂存区。
+新增 `.ps1` 默认使用 UTF-8 无 BOM + LF，适用于 PowerShell 7 和 Unix；明确使用 Windows PowerShell 5.1 且包含中文时，用户可自行在项目规则文件中记录 UTF-8 BOM 例外。Visual Studio/MSVC 的 `.rc/.rc2` 新文件使用 UTF-8 BOM + LF，这是为旧资源工具链保留的明确例外。`.bat/.cmd` 必须使用 UTF-8 无 BOM + CRLF，并用 `*.bat text eol=crlf` 和 `*.cmd text eol=crlf` 保证 Git 检出结果。这两条规则只覆盖批处理文件的全局 `* -text`，其他历史文件仍保留原始字节。新建 `.gitattributes` 时默认加入这些规则；已有仓库补充规则时，后续 checkout、reset 或重新暂存可能把现有批处理转换为 CRLF。Skill 不自动执行 `git add --renormalize`，不批量改写已有脚本，也不修改暂存区。
 
 主动操作包括以下入口：
 
@@ -20,6 +20,8 @@ Skill 自动加载后，日常修改无需输入命令。若项目根目录存�
 业务仓库的当前工作目录启动；Codex 注入 `PLUGIN_ROOT` 和兼容变量
 `CLAUDE_PLUGIN_ROOT`，Claude 使用后者，脚本据此定位插件资源。未加载或未信任时回退到主 Skill 指导的
 检查路径，由客户端/模型能力决定。
+`hooks.json` 的 `timeout` 单位是秒：SessionStart 显式为 10 秒，PostToolUse/Stop 为 60 秒。若目标是
+3000 毫秒，应写 `3`；写 `3000` 会得到 3000 秒。
 项目初始化时如需让 Git 在提交阶段自动拦截污染，可在审阅 doctor 报告后运行
 `doctor.py --install-hook --yes` 安装仓库私有 `pre-commit`；这属于初始化后的可选机械门禁，不是日常 AI 命令。
 如果仓库还缺少 `.editorconfig`、`.gitattributes` 或安全的 Git local 配置，应改用
@@ -32,6 +34,9 @@ Skill 不会自行更新；doctor 发现远端新版本时会给出 Claude/Codex
 无 HEAD 的新仓库默认严格检查首个提交；只有明确导入老项目历史基线时，才使用
 `check_diff.py --allow-initial-baseline`，并应记录这次例外的风险。若要让已安装的本地 Hook 同步接受一次例外，
 需显式设置 `JOJO_CODE_GUARD_ALLOW_INITIAL_BASELINE=1`，完成这次导入后应立即取消该环境变量。
+明确授权的单文件迁移可重复使用 `--allow-migration encoding:path/to/file`、`bom:path/to/file` 或
+`eol:path/to/file`；路径必须精确且不支持 glob。Git Hook 可通过 JSON 数组
+`JOJO_CODE_GUARD_ALLOW_MIGRATIONS` 传入同样的一次性许可。
 
 Codex 中可说“使用 `$jojo-code-guard` 执行 doctor”；Claude Code 中可使用 `/jojo-code-guard:doctor`（其他入口同理）。客户端不支持命令时直接使用自然语言即可。也可以直接提出低频需求，例如“检查历史乱码”“只修复这个文件的换行”。涉及全局配置、批量转码、批量换行或安装软件时，必须先展示影响并确认。
 

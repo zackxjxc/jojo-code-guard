@@ -30,22 +30,27 @@ CODEX_PLUGIN_ID = PLUGIN_ID
 REMOTE_PLUGIN_MANIFEST_URL = (
     "https://raw.githubusercontent.com/zackxjxc/jojo-code-guard/master/.claude-plugin/plugin.json"
 )
+PLUGIN_RESOURCE_SHA256 = {
+    "hooks/hooks.json": "46f1d12396e4d2a981f75e983c986388816b85c474256c8fc7d40037e2b0d468",
+    "hooks/session-start": "4b9a3461a0d7ef0f804d34fbbe79008e86737222b856a20cd1b6077397118adb",
+    "hooks/post-write-check": "08ee075a1101b847efccc6b0c39ca85e49158dc6202296f17a6e12ff522a8fdb",
+    "hooks/run-hook.cmd": "9ca38a90bf001ddc017dcac21014ef4aa50126ce8d7cc7dc606666f44efe7d1b",
+    "skills/jojo-code-guard/SKILL.md": "69c123f1d68c83d460eb49ace9a4f5849c2d8b665466cb46122b0ed6278d7345",
+    "skills/jojo-code-guard/通用规则.md": "d2ff529f27a867a1bb10c82228a80485e9dfb89fb637d183bc503f66d5f46605",
+    "skills/jojo-code-guard/PowerShell规则.md": "fce51181a71684323c612a5f1d4aa311fca2be15fa1fe6e6d156937c9d19c416",
+    "skills/jojo-code-guard/references/自动加载规则.md": "18bc671c2b492d2ea0d6ea7bccd6d65825f3c1f1b9a7e7a23931a2ec43889aca",
+    "skills/jojo-code-guard/scripts/check_diff.py": "f3949b144cf69fed40aaffff34146c6f624bfab3d2f9f5709ff3024e5e6f911d",
+    "skills/jojo-code-guard/scripts/guard_core.py": "52bf8487fc218aa4134c4c5891f8700c2f56c9fc49ea7642854c0e0041c44f81",
+    "skills/jojo-code-guard/scripts/hook_check.py": "aae71657777aa0cae609cc00d7cefc273b4d3ee2afc59b06d20984c8c3b9d0ca",
+    "skills/jojo-code-guard/scripts/install_hook.py": "c351b91d2236d51e717f19787fd15ac87a16d77a12d4c96b42396b5669c6ecb9",
+}
 CLAUDE_PLUGIN_REQUIRED_FILES = (
     ".claude-plugin/plugin.json",
-    "hooks/hooks.json",
-    "hooks/session-start",
-    "hooks/post-write-check",
-    "skills/jojo-code-guard/SKILL.md",
-    "skills/jojo-code-guard/通用规则.md",
-    "skills/jojo-code-guard/references/自动加载规则.md",
+    *PLUGIN_RESOURCE_SHA256,
 )
 CODEX_PLUGIN_REQUIRED_FILES = (
     ".codex-plugin/plugin.json",
-    "hooks/session-start",
-    "hooks/post-write-check",
-    "skills/jojo-code-guard/SKILL.md",
-    "skills/jojo-code-guard/通用规则.md",
-    "skills/jojo-code-guard/references/自动加载规则.md",
+    *PLUGIN_RESOURCE_SHA256,
 )
 
 # doctor 管理的用户级规则目标和自动加载节标题
@@ -168,9 +173,9 @@ def _check_git(findings: list[Finding], repo: Path) -> None:
 
 
 def _read_utf8(path: Path) -> str | None:
-    """严格读取规则文件；失败时返回 None。"""
+    """严格读取 UTF-8，并保留文件中的原始换行符。"""
     try:
-        return path.read_text(encoding="utf-8-sig")
+        return path.read_bytes().decode("utf-8-sig", errors="strict")
     except (OSError, UnicodeError):
         return None
 
@@ -285,15 +290,20 @@ def _check_attributes(findings: list[Finding], repo: Path) -> None:
         for line in content.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
-    risky_tokens = ("text", "text=auto", "eol=lf", "eol=crlf", "working-tree-encoding=UTF-8")
     standard_batch_rules = {"*.bat text eol=crlf", "*.cmd text eol=crlf"}
-    risky = [
-        line
-        for line in lines
-        if " ".join(line.lower().split()) not in standard_batch_rules
-        and any(token in line.split() for token in risky_tokens)
-    ]
-    preserves_default = any(line.startswith("* -text") for line in lines)
+    risky: list[str] = []
+    for line in lines:
+        normalized = " ".join(line.lower().split())
+        if normalized in standard_batch_rules:
+            continue
+        tokens = normalized.split()
+        if any(
+            token in {"text", "text=auto", "eol=lf", "eol=crlf"}
+            or token.startswith("working-tree-encoding=")
+            for token in tokens
+        ):
+            risky.append(line)
+    preserves_default = any(" ".join(line.lower().split()).startswith("* -text") for line in lines)
     if risky:
         message = "存在可能规范化老文件的具体规则：" + "; ".join(risky[:6])
         if preserves_default:
@@ -469,7 +479,14 @@ def _check_source_plugin_version(findings: list[Finding]) -> str | None:
         )
         return None
     if not versions:
-        findings.append(Finding("BLOCKED", "插件源码", "Version", "未找到可解析的客户端 manifest 版本"))
+        findings.append(
+            Finding(
+                "WARNING",
+                "插件源码",
+                "Version",
+                "当前为直接 Skill 安装或未随附客户端 manifest；无法确定发布版本，跳过版本一致性比较",
+            )
+        )
         return None
     unique = set(versions.values())
     summary = "，".join(f"{client}={version}" for client, version in sorted(versions.items()))
@@ -598,6 +615,57 @@ def _check_hook_manifest_freshness(
             Finding("OK", client, "Hook manifest", f"与当前 doctor 随附清单一致：{installed_path}")
         )
     return installed_path
+
+
+def _resource_sha256(path: Path) -> str:
+    """流式计算受管资源摘要，避免把文件大小当作可信前提。"""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(128 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _check_plugin_resource_integrity(
+    findings: list[Finding], client: str, install_path: Path
+) -> bool:
+    """用 doctor 内置摘要校验可执行资源和提示规则，并拒绝目录外符号链接。"""
+    failures: list[str] = []
+    root = install_path.resolve()
+    for relative, expected in PLUGIN_RESOURCE_SHA256.items():
+        path = install_path / relative
+        try:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(root)
+            if path.is_symlink() or not path.is_file():
+                failures.append(f"{relative}（不是普通文件）")
+                continue
+            actual = _resource_sha256(path)
+        except (OSError, ValueError) as error:
+            failures.append(f"{relative}（无法安全读取：{error}）")
+            continue
+        if actual != expected:
+            failures.append(f"{relative}（SHA-256 不匹配）")
+
+    if failures:
+        findings.append(
+            Finding(
+                "BLOCKED",
+                client,
+                "Plugin resource integrity",
+                "安装资源被修改、损坏或越出插件目录：" + "，".join(failures),
+            )
+        )
+        return False
+    findings.append(
+        Finding(
+            "OK",
+            client,
+            "Plugin resource integrity",
+            f"{len(PLUGIN_RESOURCE_SHA256)} 个受管资源摘要一致",
+        )
+    )
+    return True
 
 
 def _check_installed_plugin_version(
@@ -874,6 +942,7 @@ def _check_codex_plugin(findings: list[Finding], expected_version: str | None = 
         findings.append(Finding("BLOCKED", "Codex", "Plugin resources", "安装目录缺少资源：" + ", ".join(missing)))
     else:
         findings.append(Finding("OK", "Codex", "Plugin resources", str(install_path)))
+        _check_plugin_resource_integrity(findings, "Codex", install_path)
         capabilities = _hook_capabilities(
             manifest,
             ("apply_patch", "Edit", "Write", "Bash"),
@@ -1077,6 +1146,7 @@ def _check_claude_hooks(findings: list[Finding], expected_version: str | None = 
         )
     else:
         findings.append(Finding("OK", "Claude", "Plugin resources", str(install_path)))
+        _check_plugin_resource_integrity(findings, "Claude", install_path)
         capabilities = _hook_capabilities(
             hooks_manifest,
             ("Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "PowerShell"),
@@ -1101,9 +1171,8 @@ def _global_rule_section_source_path() -> Path:
 
 
 def _global_rule_target_paths() -> list[Path]:
-    """生成 Claude 与 Codex 的固定用户级规则路径。"""
-    home = Path.home()
-    return [home / relative for relative in GLOBAL_RULE_TARGET_RELATIVE_PATHS]
+    """生成 Claude 与 Codex 的用户级规则路径，并尊重 CODEX_HOME。"""
+    return [_find_claude_home() / "CLAUDE.md", _find_codex_home() / "AGENTS.md"]
 
 
 def _normalize_newlines(text: str) -> str:
@@ -1190,12 +1259,46 @@ def _global_rule_line_ending(text: str) -> str:
     return "\r\n" if crlf else "\r" if cr_only else "\n"
 
 
+def _markdown_headings(text: str) -> list[tuple[int, int, str]]:
+    """返回 fenced code block 之外的一、二级 ATX 标题及其字节无关字符范围。"""
+    headings: list[tuple[int, int, str]] = []
+    fence_character = ""
+    fence_length = 0
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        fence = re.match(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$", body)
+        if fence:
+            marker = fence.group(1)
+            if not fence_character:
+                fence_character = marker[0]
+                fence_length = len(marker)
+            elif marker[0] == fence_character and len(marker) >= fence_length and not fence.group(2).strip():
+                fence_character = ""
+                fence_length = 0
+            offset += len(line)
+            continue
+        if not fence_character:
+            heading = re.match(r"^(#{1,2})[ \t]+(.+?)[ \t]*#*[ \t]*$", body)
+            if heading:
+                headings.append((offset, offset + len(line), heading.group(2).rstrip()))
+        offset += len(line)
+    return headings
+
+
 def _global_rule_section_ranges(text: str) -> list[tuple[int, int]]:
-    """定位所有新旧 jojo-code-guard 自动加载节。"""
+    """定位 fenced code block 之外所有新旧 jojo-code-guard 自动加载节。"""
+    managed_titles = {
+        "jojo-code-guard 自动加载",
+        "jojo-code-guard 自动加载（必须严格遵守）",
+    }
+    headings = _markdown_headings(text)
     ranges: list[tuple[int, int]] = []
-    for match in GLOBAL_RULE_SECTION_PATTERN.finditer(text):
-        next_heading = GLOBAL_RULE_NEXT_SECTION_PATTERN.search(text, match.end())
-        ranges.append((match.start(), next_heading.start() if next_heading else len(text)))
+    for index, (start, _end, title) in enumerate(headings):
+        if title not in managed_titles:
+            continue
+        next_start = headings[index + 1][0] if index + 1 < len(headings) else len(text)
+        ranges.append((start, next_start))
     return ranges
 
 
@@ -1562,6 +1665,33 @@ def _iter_setting_values(settings: dict[str, object]):
             yield from _iter_setting_values(value)
 
 
+def _check_worktree_status(findings: list[Finding], repo: Path) -> None:
+    """区分干净工作区与 Git 状态查询失败，避免失败时误报安全。"""
+    result = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=str(repo),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).decode("utf-8", errors="replace").strip()
+        findings.append(
+            Finding(
+                "BLOCKED",
+                "工作区",
+                "未提交修改",
+                "git status 执行失败，无法确认工作区是否干净" + (f"：{detail}" if detail else ""),
+            )
+        )
+        return
+    status = result.stdout.decode("utf-8", errors="replace").strip()
+    if status:
+        findings.append(Finding("WARNING", "工作区", "未提交修改", "存在；修复配置前不要覆盖这些修改"))
+    else:
+        findings.append(Finding("OK", "工作区", "未提交修改", "干净"))
+
+
 def _check_repo(findings: list[Finding], repo: Path) -> None:
     """检查仓库规则文件、状态和潜在格式化设置。"""
     for name in (".gitignore",):
@@ -1583,7 +1713,7 @@ def _check_repo(findings: list[Finding], repo: Path) -> None:
     _check_attributes(findings, repo)
     _check_vscode_settings(findings, repo)
     _check_hook(findings, repo)
-    status = run_git(repo, ["status", "--short"], check=False).decode("utf-8", errors="replace").strip()
+    _check_worktree_status(findings, repo)
     head_check = subprocess.run(
         ["git", "rev-parse", "--verify", "HEAD"],
         cwd=str(repo),
@@ -1602,10 +1732,6 @@ def _check_repo(findings: list[Finding], repo: Path) -> None:
                 "不可解码、二进制和替换字符仍会阻断",
             )
         )
-    if status:
-        findings.append(Finding("WARNING", "工作区", "未提交修改", "存在；修复配置前不要覆盖这些修改"))
-    else:
-        findings.append(Finding("OK", "工作区", "未提交修改", "干净"))
 
 
 def _template(name: str) -> bytes:
@@ -1720,7 +1846,7 @@ def _ps_single_quote(value: str) -> str:
 
 
 def _run_elevated_install(commands: list[list[str]]) -> tuple[bool, str]:
-    """生成临时 PowerShell 脚本并通过 UAC 请求管理员权限执行。"""
+    """生成临时 PowerShell 脚本，通过 UAC 执行并等待真实退出码。"""
     powershell = shutil.which("pwsh") or shutil.which("powershell")
     if not powershell:
         return False, "未找到 PowerShell，无法申请 UAC 管理员权限"
@@ -1732,34 +1858,41 @@ def _run_elevated_install(commands: list[list[str]]) -> tuple[bool, str]:
 $commands = ConvertFrom-Json -InputObject @'
 {payload}
 '@
+$failed = $false
 foreach ($command in $commands) {{
     $executable = [string]$command[0]
     $commandArguments = @($command | Select-Object -Skip 1)
     Write-Host "正在执行：$executable"
     & $executable @commandArguments
     if ($LASTEXITCODE -ne 0) {{
+        $failed = $true
         Write-Warning "命令失败，退出码：$LASTEXITCODE"
     }}
 }}
-Write-Host "安装脚本执行完毕。"
-Read-Host "按 Enter 关闭此管理员窗口"
 Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+if ($failed) {{ exit 1 }}
+exit 0
 '''
-    script_path.write_text(script, encoding="utf-8", newline="\n")
-    argument_list = "-NoProfile -ExecutionPolicy Bypass -File " + _ps_single_quote(str(script_path))
+    encoding = "utf-8-sig" if Path(powershell).name.lower() == "powershell.exe" else "utf-8"
+    script_path.write_text(script, encoding=encoding, newline="\n")
+    argument_list = subprocess.list2cmdline(
+        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)]
+    )
     command = (
-        "Start-Process -FilePath "
+        "$process = Start-Process -FilePath "
         + _ps_single_quote(powershell)
         + " -ArgumentList "
         + _ps_single_quote(argument_list)
         + " -WorkingDirectory "
         + _ps_single_quote(str(Path.cwd()))
-        + " -Verb RunAs"
+        + " -Verb RunAs -Wait -PassThru; "
+        + "if ($null -eq $process) { exit 1 }; exit [int]$process.ExitCode"
     )
     code, output = _run([powershell, "-NoProfile", "-Command", command])
     if code != 0:
+        script_path.unlink(missing_ok=True)
         return False, output or "启动 UAC 管理员安装脚本失败"
-    return True, f"已创建管理员安装脚本：{script_path}；请在 UAC 提示中选择“是”并授权"
+    return True, "管理员安装脚本已执行完成且返回成功"
 
 
 def _install_tools(findings: list[Finding]) -> None:
@@ -1769,11 +1902,12 @@ def _install_tools(findings: list[Finding]) -> None:
     if system == "Windows" and shutil.which("winget"):
         for tool, package in (("PowerShell 7", "Microsoft.PowerShell"), ("gsudo", "gerardog.gsudo"), ("ripgrep", "BurntSushi.ripgrep.MSVC")):
             executable = "pwsh" if tool == "PowerShell 7" else "gsudo" if tool == "gsudo" else "rg"
-            action = "upgrade" if shutil.which(executable) else "install"
+            if shutil.which(executable):
+                continue
             commands.append(
                 [
                     "winget",
-                    action,
+                    "install",
                     "--id",
                     package,
                     "--exact",
@@ -1783,12 +1917,12 @@ def _install_tools(findings: list[Finding]) -> None:
                     "--accept-package-agreements",
                 ]
             )
-    elif system == "Darwin" and shutil.which("brew"):
-        commands.append(["brew", "upgrade" if shutil.which("rg") else "install", "ripgrep"])
+    elif system == "Darwin" and shutil.which("brew") and not shutil.which("rg"):
+        commands.append(["brew", "install", "ripgrep"])
     if commands:
         if system == "Windows" and not _is_windows_admin():
             launched, message = _run_elevated_install(commands)
-            findings.append(Finding("ACTION_REQUIRED" if launched else "BLOCKED", "设备安装", "UAC", message))
+            findings.append(Finding("OK" if launched else "BLOCKED", "设备安装", "UAC", message))
         else:
             for command in commands:
                 code, output = _run(command)
@@ -1848,10 +1982,10 @@ def main(arguments: list[str] | None = None) -> int:
         elif git_bash.exists():
             findings.append(
                 Finding(
-                    "ACTION_REQUIRED",
+                    "OK",
                     "设备",
                     "Git Bash",
-                    f"已安装于 {git_bash}，但 bash 不在 PATH；Claude/Codex 生命周期 Hook 无法按当前命令启动",
+                    f"已安装于 {git_bash}；即使 bash 不在 Windows PATH，Claude 的 Bash shell 与包内 Windows 启动器仍可定位它",
                 )
             )
         else:

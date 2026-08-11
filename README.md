@@ -68,6 +68,8 @@ git add --chmod=+x hooks/session-start hooks/post-write-check
 `Stop` 会再检查一次未被工具 matcher 捕获的写入，并使用重入标记避免循环。Claude 和当前实测的
 Codex 0.142.3 都从包内 `hooks/hooks.json` 发现生命周期 Hook；Codex 的执行仍取决于客户端版本、
 Hook 功能和信任策略。
+Hook 清单中的 `timeout` 单位是秒。本项目显式使用 SessionStart 10 秒、差异检查 60 秒；如果目标是
+3000 毫秒，应写 `3`，不能写 `3000`，后者会变成 3000 秒。
 主 Skill 加载后会自动读取同目录的 `通用规则.md`；用户级全局文件只负责引导 Skill 自动加载，
 不再承载会随 Skill 演进的通用规则。
 Hook 从业务仓库的当前工作目录启动；Codex 注入 `PLUGIN_ROOT` 和兼容变量
@@ -76,7 +78,7 @@ Hook 从业务仓库的当前工作目录启动；Codex 注入 `PLUGIN_ROOT` 和
 通过 Bash、外部脚本或其他客户端写文件时，由 AI 在每次写入后自动运行 `check_diff.py`；用户日常不需要输入检查命令。插件 Hook 或 Skill 未加载时，不能声称已经完成自动检查。
 低频操作可以使用 `doctor`、`check-diff` 和 `help`，也可以直接用自然语言提出要求。
 
-新增 `.ps1` 默认采用 UTF-8 无 BOM + LF；只有明确使用 Windows PowerShell 5.1 且包含中文时，用户可自行在项目规则文件中声明 UTF-8 BOM 例外。
+新增 `.ps1` 默认采用 UTF-8 无 BOM + LF；只有明确使用 Windows PowerShell 5.1 且包含中文时，用户可自行在项目规则文件中声明 UTF-8 BOM 例外。Visual Studio/MSVC 资源脚本 `.rc/.rc2` 是有意保留的例外：新增文件使用 UTF-8 BOM + LF，避免旧版资源编译链误判中文编码。
 
 Codex 中会分别显示以下入口：
 
@@ -109,6 +111,9 @@ doctor 不会用模板覆盖仓库已有配置。为已有 `.gitattributes` 补�
 无 HEAD 的新仓库默认严格检查首个提交；明确导入老项目历史基线时可使用
 `--allow-initial-baseline`，并应在项目变更记录中说明例外。若要让已安装的本地 Hook 同步接受一次例外，显式设置
 `JOJO_CODE_GUARD_ALLOW_INITIAL_BASELINE=1`，完成这次导入后立即取消该环境变量。
+已获用户明确授权的单文件编码、BOM 或换行迁移，应使用可重复的精确路径参数，例如
+`--allow-migration encoding:path/to/file`、`bom:path/to/file` 或 `eol:path/to/file`；不接受 glob，且未列出的
+迁移仍会阻断。Git Hook 可用 JSON 数组环境变量 `JOJO_CODE_GUARD_ALLOW_MIGRATIONS` 传递同一组一次性许可。
 
 项目首次初始化时先在已加载 Skill 的客户端调用 `doctor` 查看只读报告；确认后可一次补齐缺失的保守配置和可选 Git 门禁：
 
@@ -134,3 +139,6 @@ Codex 插件安装或升级后需重新打开会话，使主 Skill Discovery 生
 `SessionStart`、`PostToolUse` 和 `Stop`。当前 Codex 版本仍不保证未信任 Hook 的执行，未启用时由主 Skill
 指导 AI 完成检查；
 Git pre-commit 只是按需安装的提交阶段补充门禁。
+
+两个适配包同步脚本会先在安装目录旁构建并校验完整的新目录，再替换旧目录；因此已从源码删除的托管资源
+不会残留，构建失败时也不会留下半更新安装。

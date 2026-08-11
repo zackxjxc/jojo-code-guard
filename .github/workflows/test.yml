@@ -21,6 +21,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -45,7 +47,26 @@ jobs:
           bash -n hooks/post-write-check
 
       - name: Check Git whitespace
-        run: git diff --check
+        shell: bash
+        env:
+          JOJO_EVENT_NAME: ${{ github.event_name }}
+          JOJO_BEFORE_SHA: ${{ github.event.before }}
+          JOJO_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$JOJO_EVENT_NAME" = "pull_request" ] \
+              && git cat-file -e "${JOJO_PR_BASE_SHA}^{commit}" 2>/dev/null; then
+            diff_base="$(git merge-base "$JOJO_PR_BASE_SHA" HEAD)"
+          elif [ "$JOJO_EVENT_NAME" = "push" ] \
+              && [ -n "$JOJO_BEFORE_SHA" ] \
+              && [ "$JOJO_BEFORE_SHA" != "0000000000000000000000000000000000000000" ] \
+              && git cat-file -e "${JOJO_BEFORE_SHA}^{commit}" 2>/dev/null; then
+            diff_base="$JOJO_BEFORE_SHA"
+          elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            diff_base="$(git rev-parse HEAD^)"
+          else
+            diff_base="$(git hash-object -t tree /dev/null)"
+          fi
+          git diff --check "$diff_base" HEAD
 
       - name: Run repository guard
-        run: python skills/jojo-code-guard/scripts/check_diff.py --repo .
+        run: python skills/jojo-code-guard/scripts/check_diff.py --repo . --tracked-revision HEAD

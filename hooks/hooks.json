@@ -2,12 +2,13 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume|clear|compact",
+        "matcher": "startup|resume|clear|compact|fork",
         "hooks": [
           {
             "type": "command",
             "command": "bash --norc --noprofile \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/session-start\"",
-            "commandWindows": "bash --norc --noprofile -c IFS=;p=${PLUGIN_ROOT//\\\\//};$p/hooks/session-start",
+            "commandWindows": "call \"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" session-start",
+            "timeout": 10,
             "async": false
           }
         ]
@@ -20,7 +21,8 @@
           {
             "type": "command",
             "command": "bash --norc --noprofile \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/post-write-check\"",
-            "commandWindows": "bash --norc --noprofile -c IFS=;p=${PLUGIN_ROOT//\\\\//};$p/hooks/post-write-check",
+            "commandWindows": "call \"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" post-write-check",
+            "timeout": 60,
             "async": false
           }
         ]
@@ -32,7 +34,8 @@
           {
             "type": "command",
             "command": "bash --norc --noprofile \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/post-write-check\"",
-            "commandWindows": "bash --norc --noprofile -c IFS=;p=${PLUGIN_ROOT//\\\\//};$p/hooks/post-write-check",
+            "commandWindows": "call \"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" post-write-check",
+            "timeout": 60,
             "async": false
           }
         ]

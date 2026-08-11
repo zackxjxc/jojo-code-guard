@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -20,6 +21,21 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL_SCRIPTS = ROOT / "skills" / "jojo-code-guard" / "scripts"
 sys.path.insert(0, str(SKILL_SCRIPTS))
 sys.path.insert(0, str(ROOT / "scripts"))
+
+
+def _find_bash() -> str:
+    """在 Windows 上不依赖 PATH 定位测试所需的 Git Bash。"""
+    candidates = [os.environ.get("CLAUDE_CODE_GIT_BASH_PATH", "")]
+    if os.name == "nt":
+        for variable in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+            program_files = os.environ.get(variable)
+            if program_files:
+                candidates.append(str(Path(program_files) / "Git" / "bin" / "bash.exe"))
+    candidates.append(shutil.which("bash") or "")
+    return next((candidate for candidate in candidates if candidate and Path(candidate).is_file()), "bash")
+
+
+BASH = _find_bash()
 
 import doctor  # noqa: E402
 import sync_claude_plugin  # noqa: E402
@@ -39,8 +55,8 @@ class ClaudeAdapterTests(unittest.TestCase):
         self.assertTrue((skill_root / "references" / "自动加载规则.md").is_file())
         self.assertFalse((skill_root / "references" / "全局规则.md").exists())
 
-    def test_sync_removes_obsolete_launchers(self) -> None:
-        """同步包应完整生成并移除旧版启动器。"""
+    def test_sync_refreshes_windows_launcher_and_removes_obsolete_shell_launcher(self) -> None:
+        """同步包应刷新 Windows 启动器，并移除已废弃的 shell 启动器。"""
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "adapter"
             hooks_dir = destination / "hooks"
@@ -69,7 +85,10 @@ class ClaudeAdapterTests(unittest.TestCase):
                     result = sync_claude_plugin.main()
 
             self.assertEqual(result, 0)
-            self.assertFalse((hooks_dir / "run-hook.cmd").exists())
+            self.assertEqual(
+                (hooks_dir / "run-hook.cmd").read_bytes(),
+                (ROOT / "hooks" / "run-hook.cmd").read_bytes(),
+            )
             self.assertFalse((hooks_dir / "run-hook.sh").exists())
             self.assertFalse(old_skill.exists())
             self.assertFalse(old_commit_skill.exists())
@@ -84,6 +103,27 @@ class ClaudeAdapterTests(unittest.TestCase):
                 for name in ("session-start", "post-write-check"):
                     mode = (hooks_dir / name).stat().st_mode
                     self.assertTrue(mode & stat.S_IXUSR, name)
+
+    def test_sync_build_failure_preserves_existing_install(self) -> None:
+        """新适配包完成校验前失败时，旧安装目录必须保持原样。"""
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            destination = parent / "adapter"
+            destination.mkdir()
+            marker = destination / "keep.txt"
+            marker.write_text("existing\n", encoding="utf-8")
+
+            with mock.patch.dict(os.environ, {"JOJO_CLAUDE_PLUGIN_DIR": str(destination)}), mock.patch.object(
+                sync_claude_plugin, "_validate_adapter", side_effect=RuntimeError("validation failed")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "validation failed"):
+                    sync_claude_plugin.main()
+
+            self.assertEqual(marker.read_text(encoding="utf-8"), "existing\n")
+            self.assertEqual(
+                [path for path in parent.iterdir() if path.name.startswith(".adapter.sync-")],
+                [],
+            )
 
     def test_codex_sync_removes_obsolete_skill(self) -> None:
         """Codex 同步包应包含主 Skill，且不得保留旧 Skill。"""
@@ -100,6 +140,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             (old_commands / "commit.md").write_text("old commit command\n", encoding="utf-8")
             old_hooks = destination / "hooks"
             old_hooks.mkdir(parents=True)
+            (old_hooks / "run-hook.cmd").write_text("old launcher\n", encoding="utf-8")
             (old_hooks / "run-hook.sh").write_text("old launcher\n", encoding="utf-8")
             references = destination / "skills" / "jojo-code-guard" / "references"
             obsolete_documents = [
@@ -120,6 +161,10 @@ class ClaudeAdapterTests(unittest.TestCase):
             self.assertTrue((destination / "skills" / "jojo-code-guard-doctor" / "SKILL.md").is_file())
             self.assertFalse((destination / "commands" / "check-diff.md").exists())
             self.assertFalse((destination / "commands" / "commit.md").exists())
+            self.assertEqual(
+                (destination / "hooks" / "run-hook.cmd").read_bytes(),
+                (ROOT / "hooks" / "run-hook.cmd").read_bytes(),
+            )
             self.assertFalse((destination / "hooks" / "run-hook.sh").exists())
             for relative in doctor.CODEX_PLUGIN_REQUIRED_FILES:
                 self.assertTrue((destination / relative).is_file(), relative)
@@ -132,16 +177,20 @@ class ClaudeAdapterTests(unittest.TestCase):
             if os.name != "nt":
                 self.assertTrue((destination / "hooks" / "post-write-check").stat().st_mode & stat.S_IXUSR)
 
-    def test_manifest_invokes_bash_explicitly(self) -> None:
-        """插件 manifest 应在命令中直接通过 Bash 执行 SessionStart。"""
+    def test_manifest_covers_fork_and_uses_bounded_session_launcher(self) -> None:
+        """SessionStart 应覆盖 fork，并以秒为单位设置短超时。"""
         data = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
-        handler = data["hooks"]["SessionStart"][0]["hooks"][0]
+        entry = data["hooks"]["SessionStart"][0]
+        handler = entry["hooks"][0]
 
+        self.assertEqual(entry["matcher"], "startup|resume|clear|compact|fork")
         self.assertNotIn("shell", handler)
         self.assertIn("${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}", handler["command"])
         self.assertIn("/hooks/session-start", handler["command"])
-        self.assertIn("commandWindows", handler)
-        self.assertIn("p=${PLUGIN_ROOT//\\\\//}", handler["commandWindows"])
+        self.assertIn("%PLUGIN_ROOT%", handler["commandWindows"])
+        self.assertIn("run-hook.cmd", handler["commandWindows"])
+        self.assertNotIn("bash", handler["commandWindows"].lower())
+        self.assertEqual(handler["timeout"], 10)
         self.assertFalse(handler["async"])
 
     def test_manifest_runs_checks_for_edit_shell_and_stop_events(self) -> None:
@@ -158,7 +207,9 @@ class ClaudeAdapterTests(unittest.TestCase):
         self.assertNotIn("shell", handler)
         self.assertIn("${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}", handler["command"])
         self.assertIn("post-write-check", handler["command"])
-        self.assertIn("commandWindows", handler)
+        self.assertIn("run-hook.cmd", handler["commandWindows"])
+        self.assertNotIn("bash", handler["commandWindows"].lower())
+        self.assertEqual(handler["timeout"], 60)
         self.assertFalse(handler["async"])
         stop_entry = data["hooks"]["Stop"][0]
         self.assertNotIn("matcher", stop_entry)
@@ -166,6 +217,7 @@ class ClaudeAdapterTests(unittest.TestCase):
         self.assertIn("post-write-check", stop_handler["command"])
         self.assertEqual(stop_handler["command"], handler["command"])
         self.assertEqual(stop_handler["commandWindows"], handler["commandWindows"])
+        self.assertEqual(stop_handler["timeout"], 60)
 
     def test_post_write_check_blocks_eol_rewrite(self) -> None:
         """Claude 写入后 Hook 应能阻断纯换行重写。"""
@@ -187,7 +239,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             environment["CLAUDE_PROJECT_DIR"] = str(project)
 
             result = subprocess.run(
-                ["bash", str(ROOT / "hooks" / "post-write-check")],
+                [BASH, str(ROOT / "hooks" / "post-write-check")],
                 cwd=project,
                 env=environment,
                 stdout=subprocess.PIPE,
@@ -203,7 +255,11 @@ class ClaudeAdapterTests(unittest.TestCase):
             self.assertIn("reason", payload)
             self.assertNotIn("stopReason", payload)
             self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "PostToolUse")
-            self.assertIn("PURE_TEXT_REWRITE", payload["hookSpecificOutput"]["additionalContext"])
+            context = payload["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("PURE_TEXT_REWRITE", context)
+            self.assertIn("已有修改不等于本轮污染", context)
+            self.assertIn("不得自动恢复、覆盖或删除来源不明", context)
+            self.assertNotIn("修复污染", payload["reason"])
 
     def test_post_write_check_skips_non_git_project(self) -> None:
         """非 Git 项目不应因缺少仓库基线而报告 Hook 错误。"""
@@ -214,7 +270,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             environment["CLAUDE_PROJECT_DIR"] = str(project)
 
             result = subprocess.run(
-                ["bash", str(ROOT / "hooks" / "post-write-check")],
+                [BASH, str(ROOT / "hooks" / "post-write-check")],
                 cwd=project,
                 env=environment,
                 input=b"{}",
@@ -241,7 +297,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             environment["PLUGIN_ROOT"] = str(root)
             environment["CLAUDE_PROJECT_DIR"] = str(project)
             result = subprocess.run(
-                ["bash", str(ROOT / "hooks" / "post-write-check")],
+                [BASH, str(ROOT / "hooks" / "post-write-check")],
                 cwd=project,
                 env=environment,
                 stdout=subprocess.PIPE,
@@ -271,7 +327,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             environment = os.environ.copy()
             environment["PLUGIN_ROOT"] = str(root)
             result = subprocess.run(
-                ["bash", str(ROOT / "hooks" / "post-write-check")],
+                [BASH, str(ROOT / "hooks" / "post-write-check")],
                 cwd=project,
                 env=environment,
                 input=json.dumps({"cwd": str(project)}).encode("utf-8"),
@@ -286,6 +342,7 @@ class ClaudeAdapterTests(unittest.TestCase):
         context = payload["hookSpecificOutput"]["additionalContext"]
         self.assertIn("差异检查执行失败", context)
         self.assertIn("checker failed", context)
+        self.assertIn("不得自动恢复、覆盖或删除来源不明", context)
 
     def test_warning_diagnostics_do_not_block_or_rewake_stop(self) -> None:
         """非阻断诊断可反馈给写后检查，但不能让 Stop 无故继续一轮。"""
@@ -304,7 +361,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             environment["PLUGIN_ROOT"] = str(root)
             hook_input = json.dumps({"cwd": str(project), "stop_hook_active": False}).encode("utf-8")
             post = subprocess.run(
-                ["bash", str(ROOT / "hooks" / "post-write-check")],
+                [BASH, str(ROOT / "hooks" / "post-write-check")],
                 cwd=project,
                 env=environment,
                 input=hook_input,
@@ -313,7 +370,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                 check=False,
             )
             stop = subprocess.run(
-                ["bash", str(ROOT / "hooks" / "post-write-check")],
+                [BASH, str(ROOT / "hooks" / "post-write-check")],
                 cwd=project,
                 env=environment,
                 input=json.dumps(
@@ -351,7 +408,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             environment = os.environ.copy()
             environment["PLUGIN_ROOT"] = str(ROOT)
             result = subprocess.run(
-                ["bash", str(ROOT / "hooks" / "post-write-check")],
+                [BASH, str(ROOT / "hooks" / "post-write-check")],
                 cwd=project,
                 env=environment,
                 input=json.dumps(
@@ -372,6 +429,8 @@ class ClaudeAdapterTests(unittest.TestCase):
         self.assertTrue(payload["continue"])
         self.assertEqual(payload["decision"], "block")
         self.assertIn("PURE_TEXT_REWRITE", payload["reason"])
+        self.assertIn("已有修改不等于本轮污染", payload["reason"])
+        self.assertIn("不得自动恢复、覆盖或删除来源不明", payload["reason"])
         self.assertNotIn("hookSpecificOutput", payload)
 
     def test_stop_check_reentry_is_silent(self) -> None:
@@ -379,7 +438,7 @@ class ClaudeAdapterTests(unittest.TestCase):
         environment = os.environ.copy()
         environment["PLUGIN_ROOT"] = str(ROOT / "missing-plugin")
         result = subprocess.run(
-            ["bash", str(ROOT / "hooks" / "post-write-check")],
+            [BASH, str(ROOT / "hooks" / "post-write-check")],
             cwd=ROOT,
             env=environment,
             input=b'{"hook_event_name": "Stop", "stop_hook_active": true}',
@@ -409,7 +468,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             environment = os.environ.copy()
             environment["PLUGIN_ROOT"] = str(ROOT)
             result = subprocess.run(
-                ["bash", str(ROOT / "hooks" / "post-write-check")],
+                [BASH, str(ROOT / "hooks" / "post-write-check")],
                 cwd=project,
                 env=environment,
                 input=json.dumps(
@@ -491,7 +550,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             environment["CLAUDE_PLUGIN_ROOT"] = str(project / "stale-plugin-root")
 
             session = subprocess.run(
-                ["bash", "-c", session_command],
+                [BASH, "-c", session_command],
                 cwd=project,
                 env=environment,
                 input=json.dumps({"cwd": str(project)}).encode("utf-8"),
@@ -502,11 +561,14 @@ class ClaudeAdapterTests(unittest.TestCase):
             self.assertEqual(session.returncode, 0, session.stderr.decode("utf-8", errors="replace"))
             session_payload = json.loads(session.stdout.decode("utf-8"))
             session_context = session_payload["hookSpecificOutput"]["additionalContext"]
-            self.assertIn("<JOJO_CODE_GUARD>", session_context)
-            self.assertIn("Codex 项目规则", session_context)
+            self.assertIn("<JOJO_CODE_GUARD_LOAD_INSTRUCTION>", session_context)
+            self.assertIn("当前项目规则：", session_context)
+            self.assertIn("AGENTS.md", session_context)
+            self.assertNotIn("Codex 项目规则", session_context)
+            self.assertLess(len(session_context.encode("utf-8")), 2500)
 
             post = subprocess.run(
-                ["bash", "-c", post_command],
+                [BASH, "-c", post_command],
                 cwd=ROOT,
                 env=environment,
                 input=json.dumps({"cwd": str(project)}).encode("utf-8"),
@@ -558,9 +620,18 @@ class ClaudeAdapterTests(unittest.TestCase):
             stop_command = manifest["hooks"]["Stop"][0]["hooks"][0]["commandWindows"]
             environment = os.environ.copy()
             environment["PLUGIN_ROOT"] = str(plugin_root)
+            environment["CLAUDE_CODE_GIT_BASH_PATH"] = str(Path(BASH).resolve())
+            bash_directory = os.path.normcase(str(Path(BASH).resolve().parent))
+            environment["PATH"] = os.pathsep.join(
+                entry
+                for entry in environment.get("PATH", "").split(os.pathsep)
+                if entry and os.path.normcase(str(Path(entry.strip('"')).resolve())) != bash_directory
+            )
+            for variable in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+                environment[variable] = str(root / "missing-program-files")
 
             session = subprocess.run(
-                ["cmd.exe", "/D", "/S", "/C", session_command],
+                "cmd.exe /D /S /C " + session_command,
                 cwd=project,
                 env=environment,
                 input=b"{}",
@@ -570,13 +641,14 @@ class ClaudeAdapterTests(unittest.TestCase):
             )
             self.assertEqual(session.returncode, 0, session.stderr.decode("utf-8", errors="replace"))
             session_payload = json.loads(session.stdout.decode("utf-8"))
-            self.assertIn(
-                "Windows 项目规则",
-                session_payload["hookSpecificOutput"]["additionalContext"],
-            )
+            session_context = session_payload["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("当前项目规则：", session_context)
+            self.assertIn("AGENTS.md", session_context)
+            self.assertNotIn("Windows 项目规则", session_context)
+            self.assertLess(len(session_context.encode("utf-8")), 2500)
 
             post = subprocess.run(
-                ["cmd.exe", "/D", "/S", "/C", post_command],
+                "cmd.exe /D /S /C " + post_command,
                 cwd=project,
                 env=environment,
                 input=json.dumps({"cwd": str(project)}).encode("utf-8"),
@@ -590,7 +662,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             self.assertIn("PURE_TEXT_REWRITE", post_payload["hookSpecificOutput"]["additionalContext"])
 
             stop = subprocess.run(
-                ["cmd.exe", "/D", "/S", "/C", stop_command],
+                "cmd.exe /D /S /C " + stop_command,
                 cwd=project,
                 env=environment,
                 input=json.dumps(
@@ -604,6 +676,30 @@ class ClaudeAdapterTests(unittest.TestCase):
             stop_payload = json.loads(stop.stdout.decode("utf-8"))
             self.assertEqual(stop_payload["decision"], "block")
             self.assertIn("PURE_TEXT_REWRITE", stop_payload["reason"])
+
+    def test_windows_launcher_searches_known_bash_locations_and_uses_own_root(self) -> None:
+        """Windows 启动器应按安全顺序定位 Git Bash，并从自身路径重建插件根。"""
+        launcher = (ROOT / "hooks" / "run-hook.cmd").read_text(encoding="utf-8")
+
+        env_index = launcher.index("CLAUDE_CODE_GIT_BASH_PATH")
+        program_files_index = launcher.index("%ProgramFiles%\\Git\\bin\\bash.exe")
+        path_index = launcher.index("%%~$PATH:I")
+        self.assertLess(env_index, program_files_index)
+        self.assertLess(program_files_index, path_index)
+        self.assertIn('if /I "%JOJO_HOOK_NAME%"=="session-start"', launcher)
+        self.assertIn('if /I "%JOJO_HOOK_NAME%"=="post-write-check"', launcher)
+        self.assertIn('for %%I in ("%~dp0..") do set "PLUGIN_ROOT=%%~fI"', launcher)
+        self.assertIn('set "CLAUDE_PLUGIN_ROOT=%PLUGIN_ROOT%"', launcher)
+
+    def test_ci_checks_committed_range_and_tracked_head(self) -> None:
+        """CI 不得只检查干净工作树，应检查事件提交范围及 HEAD 跟踪内容。"""
+        workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
+
+        self.assertIn("fetch-depth: 0", workflow)
+        self.assertIn('git diff --check "$diff_base" HEAD', workflow)
+        self.assertIn("github.event.pull_request.base.sha", workflow)
+        self.assertIn("github.event.before", workflow)
+        self.assertIn("--tracked-revision HEAD", workflow)
 
     def test_codex_marketplace_uses_local_source_schema(self) -> None:
         """Codex marketplace 应使用当前 CLI 可安装的本地源格式。"""
@@ -622,6 +718,11 @@ class ClaudeAdapterTests(unittest.TestCase):
         self.assertIn("hooks/session-start text eol=lf", lines)
         self.assertIn("hooks/post-write-check text eol=lf", lines)
 
+        launcher = (ROOT / "hooks" / "run-hook.cmd").read_bytes()
+        self.assertFalse(launcher.startswith(b"\xef\xbb\xbf"))
+        self.assertTrue(launcher.endswith(b"\r\n"))
+        self.assertNotIn(b"\n", launcher.replace(b"\r\n", b""))
+
     def test_release_repository_editor_rules_remain_strict(self) -> None:
         """发布仓库规则不应误用业务老项目的 unset/auto 模板。"""
         editorconfig = (ROOT / ".editorconfig").read_text(encoding="utf-8")
@@ -634,12 +735,12 @@ class ClaudeAdapterTests(unittest.TestCase):
         self.assertEqual(settings["[bat]"]["files.eol"], "\r\n")
         self.assertEqual(settings["[powershell]"]["files.eol"], "\n")
 
-    def test_session_start_preserves_project_rules(self) -> None:
-        """插件和项目路径含空格时也应原样注入项目规则。"""
+    def test_session_start_references_rules_without_inlining_large_content(self) -> None:
+        """SessionStart 应给出绝对规则路径，不内联可能溢出的规则正文。"""
         with tempfile.TemporaryDirectory(prefix="jojo project ") as directory:
             project = Path(directory)
             plugin_root = project / "插件 root"
-            rules = '项目规则：保留 "引号"、\\反斜杠和中文。\n'
+            rules = "PROJECT_RULE_SENTINEL\n" + ("大" * 20000)
             (project / "AGENTS.md").write_text(rules, encoding="utf-8")
             with mock.patch.dict(os.environ, {"JOJO_CLAUDE_PLUGIN_DIR": str(plugin_root)}):
                 with contextlib.redirect_stdout(io.StringIO()):
@@ -650,7 +751,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             command = manifest["hooks"]["SessionStart"][0]["hooks"][0]["command"]
 
             result = subprocess.run(
-                ["bash", "-c", command],
+                [BASH, "-c", command],
                 cwd=str(project),
                 env=environment,
                 input=b"{}",
@@ -663,10 +764,27 @@ class ClaudeAdapterTests(unittest.TestCase):
             payload = json.loads(result.stdout.decode("utf-8"))
             self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
             context = payload["hookSpecificOutput"]["additionalContext"]
-            self.assertTrue(context.startswith("【强制守护规则】"))
-            self.assertIn("name: jojo-code-guard", context)
-            self.assertIn(rules.strip(), context)
-            self.assertTrue(context.endswith("</JOJO_CODE_GUARD>"))
+            self.assertTrue(context.startswith("<JOJO_CODE_GUARD_LOAD_INSTRUCTION>"))
+            self.assertIn("必需 Skill：", context)
+            self.assertIn("skills/jojo-code-guard/SKILL.md", context.replace("\\", "/"))
+            self.assertIn("当前项目规则：", context)
+            self.assertIn("AGENTS.md", context)
+            self.assertNotIn("PROJECT_RULE_SENTINEL", context)
+            self.assertNotIn("name: jojo-code-guard", context)
+            references = [
+                line.split("：", 1)[1]
+                for line in context.splitlines()
+                if line.startswith(("1. ", "2. ", "3. "))
+            ]
+            self.assertEqual(len(references), 3)
+            for reference in references:
+                if os.name == "nt":
+                    self.assertRegex(reference, r"^[A-Za-z]:/")
+                else:
+                    self.assertTrue(reference.startswith("/"), reference)
+            self.assertLess(len(context.encode("utf-8")), 2500)
+            self.assertLess(len(context), 10000)
+            self.assertTrue(context.endswith("</JOJO_CODE_GUARD_LOAD_INSTRUCTION>"))
 
     def test_session_start_reports_missing_skill_to_model(self) -> None:
         """Skill 资源缺失时应向模型注入暂停要求，不能静默继续。"""
@@ -678,7 +796,7 @@ class ClaudeAdapterTests(unittest.TestCase):
 
             result = subprocess.run(
                 [
-                    "bash",
+                    BASH,
                     "--norc",
                     "--noprofile",
                     "-c",

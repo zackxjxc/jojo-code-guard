@@ -1,26 +1,82 @@
 #!/usr/bin/env python3
-"""从发布仓库根目录生成 Codex 插件适配包。"""
+"""从发布仓库根目录原子生成完整的 Codex 插件适配包。"""
 
 from __future__ import annotations
 
 import os
 import pathlib
 import shutil
+import tempfile
+import uuid
+
+
+def _copy_tree(source: pathlib.Path, destination: pathlib.Path) -> None:
+    """复制一棵发布目录，并排除解释器缓存。"""
+    if not source.is_dir():
+        raise FileNotFoundError(f"发布目录不存在：{source}")
+    shutil.copytree(
+        source,
+        destination,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+
+
+def _validate_adapter(destination: pathlib.Path) -> None:
+    """确认生成目录包含 Codex 自动守护所需的全部资源。"""
+    required = (
+        destination / ".codex-plugin" / "plugin.json",
+        destination / "hooks" / "hooks.json",
+        destination / "hooks" / "session-start",
+        destination / "hooks" / "post-write-check",
+        destination / "hooks" / "run-hook.cmd",
+        destination / "skills" / "jojo-code-guard" / "SKILL.md",
+        destination / "skills" / "jojo-code-guard" / "scripts" / "check_diff.py",
+        destination / "skills" / "jojo-code-guard" / "scripts" / "guard_core.py",
+    )
+    missing = [str(path) for path in required if not path.is_file()]
+    if missing:
+        raise FileNotFoundError("Codex 适配包缺少资源：" + ", ".join(missing))
+
+
+def _replace_directory(staging: pathlib.Path, destination: pathlib.Path) -> None:
+    """用已校验的同盘暂存目录替换旧安装；失败时恢复旧目录。"""
+    if destination.is_symlink():
+        raise RuntimeError(f"拒绝覆盖符号链接安装目录：{destination}")
+    if destination.exists() and not destination.is_dir():
+        raise RuntimeError(f"拒绝覆盖非目录安装目标：{destination}")
+
+    backup: pathlib.Path | None = None
+    try:
+        if destination.exists():
+            backup = destination.parent / f".{destination.name}.backup-{uuid.uuid4().hex}"
+            os.replace(destination, backup)
+        os.replace(staging, destination)
+    except Exception:
+        if backup is not None and backup.exists() and not destination.exists():
+            os.replace(backup, destination)
+        raise
+    else:
+        if backup is not None:
+            shutil.rmtree(backup)
+
+
+def _build_adapter(root: pathlib.Path, staging: pathlib.Path) -> None:
+    """在空暂存目录内构建完整适配包。"""
+    source_manifest = root / ".codex-plugin" / "plugin.json"
+    if not source_manifest.is_file():
+        raise FileNotFoundError(f"Codex manifest 不存在：{source_manifest}")
+
+    manifest_destination = staging / ".codex-plugin"
+    manifest_destination.mkdir(parents=True)
+    shutil.copy2(source_manifest, manifest_destination / "plugin.json")
+    _copy_tree(root / "hooks", staging / "hooks")
+    _copy_tree(root / "skills", staging / "skills")
+    _validate_adapter(staging)
 
 
 def main() -> int:
     """复制 Codex manifest、标准 Hook 目录和共享 Skill。"""
     root = pathlib.Path(__file__).resolve().parents[1]
-    source_manifest = root / ".codex-plugin" / "plugin.json"
-    source_hooks = root / "hooks"
-    source_skills = root / "skills"
-    if not source_manifest.is_file():
-        raise FileNotFoundError(f"Codex manifest 不存在：{source_manifest}")
-    if not source_hooks.is_dir():
-        raise FileNotFoundError(f"Codex Hook 源目录不存在：{source_hooks}")
-    if not source_skills.is_dir():
-        raise FileNotFoundError(f"Skill 源目录不存在：{source_skills}")
-
     codex_home = pathlib.Path(
         os.environ.get("CODEX_HOME", str(pathlib.Path.home() / ".codex"))
     ).expanduser()
@@ -30,48 +86,22 @@ def main() -> int:
             str(codex_home / "plugins" / "jojo-code-guard"),
         )
     ).expanduser()
-    destination.joinpath(".codex-plugin").mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_manifest, destination / ".codex-plugin" / "plugin.json")
-    if source_hooks.resolve() != (destination / "hooks").resolve():
-        shutil.copytree(
-            source_hooks,
-            destination / "hooks",
-            dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-        )
 
-    for name in ("run-hook.cmd", "run-hook.sh"):
-        obsolete_launcher = destination / "hooks" / name
-        if obsolete_launcher.is_file() or obsolete_launcher.is_symlink():
-            obsolete_launcher.unlink()
+    if destination.resolve() == root.resolve():
+        _validate_adapter(root)
+        print(f"Codex plugin already uses source tree: {destination}")
+        return 0
 
-    # Claude 的 commands 由对应客户端加载；Codex 使用原生 Skill，清理本脚本曾生成的同名旧入口，避免重复触发。
-    command_destination = destination / "commands"
-    if command_destination.is_dir() and command_destination.resolve() != (root / "commands").resolve():
-        for name in ("check-diff.md", "commit.md", "doctor.md", "help.md"):
-            legacy_command = command_destination / name
-            if legacy_command.is_file():
-                legacy_command.unlink()
-
-    skill_destination = destination / "skills"
-    if source_skills.resolve() != skill_destination.resolve():
-        shutil.copytree(
-            source_skills,
-            skill_destination,
-            dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-        )
-        old_skill = skill_destination / "jojo-code-guard-sync-global-rules"
-        if old_skill.is_dir():
-            shutil.rmtree(old_skill)
-        removed_commit_skill = skill_destination / "jojo-code-guard-commit"
-        if removed_commit_skill.is_dir():
-            shutil.rmtree(removed_commit_skill)
-        references = skill_destination / "jojo-code-guard" / "references"
-        for name in ("兼容性改进计划.md", "生效与验收.md", "全局规则.md"):
-            obsolete_document = references / name
-            if obsolete_document.is_file() or obsolete_document.is_symlink():
-                obsolete_document.unlink()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = pathlib.Path(
+        tempfile.mkdtemp(prefix=f".{destination.name}.sync-", dir=destination.parent)
+    )
+    try:
+        _build_adapter(root, staging)
+        _replace_directory(staging, destination)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
     print(f"Synced Codex plugin: {destination}")
     return 0
 

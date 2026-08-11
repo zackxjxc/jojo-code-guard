@@ -15,6 +15,7 @@ try:
         check_diff_size,
         check_filemode_changes,
         find_repo,
+        migration_allowances_from_environment,
     )
 except ImportError:
     from guard_core import (
@@ -23,6 +24,7 @@ except ImportError:
         check_diff_size,
         check_filemode_changes,
         find_repo,
+        migration_allowances_from_environment,
     )
 
 
@@ -39,15 +41,17 @@ def main() -> int:
     try:
         repo = find_repo()
         allow_initial_baseline = os.environ.get("JOJO_CODE_GUARD_ALLOW_INITIAL_BASELINE") == "1"
+        migration_allowances = migration_allowances_from_environment()
         diagnostics = check_changes(
             repo,
             staged=True,
             allow_initial_baseline=allow_initial_baseline,
+            migration_allowances=migration_allowances,
         )
         diagnostics.extend(check_conversion_policy(repo, staged=True))
         diagnostics.extend(check_diff_size(repo, staged=True, block_format_only=True))
         diagnostics.extend(check_filemode_changes(repo, staged=True))
-    except RuntimeError as error:
+    except (RuntimeError, ValueError) as error:
         print(f"jojo-code-guard: {error}", file=sys.stderr)
         return 2
 

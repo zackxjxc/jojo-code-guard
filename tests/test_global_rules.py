@@ -168,6 +168,30 @@ class GlobalRuleSyncTests(unittest.TestCase):
                 self.assertNotIn("旧内容一", text)
                 self.assertNotIn("旧内容二", text)
 
+    def test_heading_inside_fenced_code_block_is_never_managed(self) -> None:
+        """代码示例里的同名标题不是受管节，任何示例和后续正文都必须保留。"""
+        with tempfile.TemporaryDirectory() as directory:
+            source, targets = self._paths(directory)
+            original = (
+                "# 用户规则\n\n"
+                "```md\n"
+                "## jojo-code-guard 自动加载（必须严格遵守）\n\n"
+                "- 这只是示例。\n"
+                "```\n\n"
+                "tail: preserve\n"
+            )
+            for target in targets:
+                target.parent.mkdir(parents=True)
+                target.write_bytes(original.encode("utf-8"))
+
+            self._sync(source, targets)
+
+            for target in targets:
+                text = target.read_text(encoding="utf-8")
+                self.assertTrue(text.startswith(original))
+                self.assertIn("- 这只是示例。\n```\n\ntail: preserve", text)
+                self.assertEqual(len(doctor._global_rule_section_ranges(text)), 1)
+
     def test_current_section_is_idempotent(self) -> None:
         """当前自动加载节已存在时不得改写任何字节。"""
         with tempfile.TemporaryDirectory() as directory:
@@ -263,6 +287,15 @@ class GlobalRuleSyncTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         sync.assert_not_called()
+
+    def test_codex_global_rule_target_respects_custom_codex_home(self) -> None:
+        """自定义 CODEX_HOME 时必须把 AGENTS.md 写入同一目录。"""
+        with tempfile.TemporaryDirectory() as directory:
+            custom_home = Path(directory) / "custom-codex"
+            with mock.patch.dict("os.environ", {"CODEX_HOME": str(custom_home)}):
+                targets = doctor._global_rule_target_paths()
+
+        self.assertEqual(targets[1], custom_home / "AGENTS.md")
 
 
 if __name__ == "__main__":

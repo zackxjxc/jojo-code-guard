@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -39,7 +41,8 @@ class PluginDoctorTests(unittest.TestCase):
             elif relative == ".claude-plugin/plugin.json":
                 self._write_json(path, {"name": "jojo-code-guard", "version": version})
             else:
-                path.write_text("{}\n" if path.suffix == ".json" else "test\n", encoding="utf-8")
+                source = doctor._plugin_root() / relative
+                shutil.copyfile(source, path)
         manifest = doctor._read_json_object(root / "hooks" / "hooks.json")
         for relative in doctor._hook_command_resources(manifest):
             path = root / relative
@@ -66,7 +69,7 @@ class PluginDoctorTests(unittest.TestCase):
             if path.exists():
                 continue
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("test\n", encoding="utf-8")
+            shutil.copyfile(doctor._plugin_root() / relative, path)
         hooks = doctor._read_json_object(installed_hooks)
         for relative in doctor._hook_command_resources(hooks):
             path = root / relative
@@ -90,6 +93,62 @@ class PluginDoctorTests(unittest.TestCase):
         with mock.patch.object(doctor, "_find_claude_home", return_value=home):
             doctor._check_claude_hooks(findings)
         return findings
+
+    def test_direct_skill_without_plugin_manifests_is_not_blocked(self) -> None:
+        """直接 Skill 安装没有客户端 manifest 时只能标记版本未知，不能误报损坏。"""
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            doctor, "_plugin_root", return_value=Path(directory)
+        ):
+            findings: list[doctor.Finding] = []
+            version = doctor._check_source_plugin_version(findings)
+
+        self.assertIsNone(version)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].level, "WARNING")
+        self.assertIn("直接 Skill 安装", findings[0].message)
+
+    def test_embedded_resource_hashes_match_release_sources(self) -> None:
+        """发布资源更新时必须同步 doctor 的内置完整性清单。"""
+        root = doctor._plugin_root()
+        actual = {
+            relative: doctor._resource_sha256(root / relative)
+            for relative in doctor.PLUGIN_RESOURCE_SHA256
+        }
+
+        self.assertEqual(actual, doctor.PLUGIN_RESOURCE_SHA256)
+
+    def test_tampered_hook_resource_is_blocked(self) -> None:
+        """版本和 Hook manifest 相同也不能掩盖被篡改的可执行入口。"""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".claude"
+            install_path = Path(directory) / "plugin"
+            self._create_plugin(install_path)
+            (install_path / "hooks" / "session-start").write_text(
+                "echo MALICIOUS\n", encoding="utf-8"
+            )
+            self._write_json(
+                home / "settings.json",
+                {"enabledPlugins": {doctor.CLAUDE_PLUGIN_ID: True}},
+            )
+            self._write_json(
+                home / "plugins" / "installed_plugins.json",
+                {
+                    "plugins": {
+                        doctor.CLAUDE_PLUGIN_ID: [
+                            {
+                                "installPath": str(install_path),
+                                "version": doctor._current_plugin_version() or "test",
+                            }
+                        ]
+                    }
+                },
+            )
+
+            findings = self._check(home)
+
+        integrity = next(item for item in findings if item.item == "Plugin resource integrity")
+        self.assertEqual(integrity.level, "BLOCKED")
+        self.assertIn("hooks/session-start", integrity.message)
 
     def test_new_remote_version_requires_update(self) -> None:
         """远端版本较新时应提示用户更新，不能声称 Skill 会自行升级。"""
@@ -531,6 +590,17 @@ class RepositorySettingsTests(unittest.TestCase):
         self.assertEqual(warning.level, "WARNING")
         self.assertIn("覆盖 * -text", warning.message)
 
+    def test_any_working_tree_encoding_rule_is_warned(self) -> None:
+        """非 UTF-8 等 working-tree-encoding 规则同样会转换工作区字节。"""
+        findings = self._attribute_findings(
+            "* -text\n*.txt working-tree-encoding=UTF-16LE\n",
+            {},
+        )
+
+        warning = next(item for item in findings if item.item == ".gitattributes")
+        self.assertEqual(warning.level, "WARNING")
+        self.assertIn("working-tree-encoding=UTF-16LE", warning.message)
+
     def test_tracked_batch_without_crlf_attributes_requires_action(self) -> None:
         """只有 * -text 时，仓库中的批处理必须得到明确配置建议。"""
         findings = self._attribute_findings("* -text\n", {"build.bat": b"@echo off\r\n"})
@@ -686,6 +756,87 @@ class RepositorySettingsTests(unittest.TestCase):
         self.assertIn("# keep", preview)
         self.assertIn("+*.bat text eol=crlf", preview)
         self.assertIn("+*.cmd text eol=crlf", preview)
+
+    def test_repair_preserves_existing_crlf_attributes(self) -> None:
+        """向 CRLF .gitattributes 追加规则时不得制造 LF/CRLF 混合换行。"""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            self._init_repo(repo)
+            attributes = repo / ".gitattributes"
+            attributes.write_bytes(b"# team rule\r\n* -text\r\n")
+
+            doctor.repair_repo(repo)
+
+            data = attributes.read_bytes()
+        self.assertIn(b"*.bat text eol=crlf\r\n", data)
+        self.assertNotIn(b"\n", data.replace(b"\r\n", b""))
+
+    def test_git_status_failure_is_blocked_not_clean(self) -> None:
+        """索引损坏或 Git 失败时不能把空 stdout 当作干净工作区。"""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            self._init_repo(repo)
+            (repo / ".git" / "index").write_bytes(b"broken")
+            findings: list[doctor.Finding] = []
+
+            doctor._check_worktree_status(findings, repo)
+
+        result = next(item for item in findings if item.item == "未提交修改")
+        self.assertEqual(result.level, "BLOCKED")
+        self.assertIn("git status 执行失败", result.message)
+
+    def test_elevated_install_quotes_path_waits_and_uses_ps51_bom(self) -> None:
+        """UAC 启动必须正确引用空格路径、等待子进程，并兼容 PowerShell 5.1。"""
+        with tempfile.TemporaryDirectory(prefix="jojo audit ") as directory:
+            script_path = Path(directory) / "probe script.ps1"
+            descriptor = os.open(script_path, os.O_CREAT | os.O_RDWR)
+            captured: list[list[str]] = []
+
+            def run(command: list[str], cwd: Path | None = None) -> tuple[int, str]:
+                del cwd
+                captured.append(command)
+                return 0, ""
+
+            with mock.patch.object(doctor.shutil, "which", side_effect=lambda name: "powershell.exe" if name == "powershell" else None), mock.patch.object(
+                doctor.tempfile, "mkstemp", return_value=(descriptor, str(script_path))
+            ), mock.patch.object(doctor, "_run", side_effect=run):
+                succeeded, _message = doctor._run_elevated_install([["winget", "install", "example"]])
+
+            data = script_path.read_bytes()
+
+        self.assertTrue(succeeded)
+        self.assertTrue(data.startswith(b"\xef\xbb\xbf"))
+        outer = captured[0][-1]
+        self.assertIn("-Wait -PassThru", outer)
+        self.assertIn(f'-File "{script_path}"', outer)
+
+    def test_install_tools_only_installs_missing_tools(self) -> None:
+        """--install-tools 不得把补齐缺失工具扩大为升级所有已安装工具。"""
+        available = {
+            "winget": "winget.exe",
+            "pwsh": "pwsh.exe",
+            "gsudo": None,
+            "rg": "rg.exe",
+        }
+        commands: list[list[str]] = []
+
+        def run(command: list[str], cwd: Path | None = None) -> tuple[int, str]:
+            del cwd
+            commands.append(command)
+            return 0, "ok"
+
+        findings: list[doctor.Finding] = []
+        with mock.patch.object(doctor.platform, "system", return_value="Windows"), mock.patch.object(
+            doctor.shutil, "which", side_effect=lambda name: available.get(name)
+        ), mock.patch.object(doctor, "_is_windows_admin", return_value=True), mock.patch.object(
+            doctor, "_run", side_effect=run
+        ):
+            doctor._install_tools(findings)
+
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0][0:2], ["winget", "install"])
+        self.assertIn("gerardog.gsudo", commands[0])
+        self.assertFalse(any("upgrade" in command for command in commands))
 
     def test_legacy_attributes_keep_git_whitespace_checks(self) -> None:
         """字节保真属性不能让源码尾随空白逃过 Git 检查。"""
