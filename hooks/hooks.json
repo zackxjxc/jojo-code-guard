@@ -14,6 +14,19 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash --norc --noprofile \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/post-write-check\"",
+            "commandWindows": "call \"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" post-write-check",
+            "timeout": 60,
+            "async": false
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "apply_patch|Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell",

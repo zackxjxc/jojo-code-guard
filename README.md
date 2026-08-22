@@ -63,9 +63,12 @@ git add --chmod=+x hooks/session-start hooks/post-write-check
 
 否则 macOS/Linux 从 GitHub 安装后可能无法直接启动 SessionStart hook。
 
-日常修改会自动遵守最小 diff 规则。插件在已知编辑和 shell 工具完成后会由 `PostToolUse` 自动运行差异检查；
-发现阻断项时用结构化诊断要求 AI 继续修复，但不能撤销已经完成的写入。AI 回合准备结束时，
-`Stop` 会再检查一次未被工具 matcher 捕获的写入，并使用重入标记避免循环。Claude 和当前实测的
+日常修改会自动遵守最小 diff 规则。插件先由 `UserPromptSubmit` 记录本回合诊断与相关文件指纹，再在
+已知编辑和 shell 工具完成后由 `PostToolUse` 自动运行差异检查。回合开始前已存在且文件指纹未变化的
+同一诊断会标记为 `pre_existing` 并降级为警告；本轮改动过问题文件、新出现的诊断或不可用的基线仍按
+阻断处理。AI 回合准备结束时，`Stop` 会再检查一次未被工具 matcher 捕获的写入，并使用重入标记避免
+循环。真正阻断时会携带 `last_assistant_message`，要求 AI 修复后继续原请求并重新交付原答案，避免把
+内部续跑误判为用户的新需求。Claude 和当前实测的
 Codex 0.142.3 都从包内 `hooks/hooks.json` 发现生命周期 Hook；Codex 的执行仍取决于客户端版本、
 Hook 功能和信任策略。
 Hook 清单中的 `timeout` 单位是秒。本项目显式使用 SessionStart 10 秒、差异检查 60 秒；如果目标是
