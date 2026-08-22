@@ -1,6 +1,6 @@
 interface:
   display_name: "jojo-code-guard"
-  short_description: "每条消息先检查暗号，再保护 C++ 编码、换行、Git diff 与 AI 修改"
-  default_prompt: "每条用户消息都先执行 $jojo-code-guard 的暗号检测；随后按需守护当前仓库，先读取规则并保护编码、换行和最小 diff。"
+  short_description: "按任务守护编码、换行和最小 diff，纯对话不读取项目"
+  default_prompt: "使用 $jojo-code-guard 先执行消息级检查，再只加载本轮实际需要的文件、C++、PowerShell 或 Git 守护规则。"
 policy:
   allow_implicit_invocation: true

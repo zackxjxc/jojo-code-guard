@@ -1,6 +1,9 @@
 # 啾啾代码守护用法
 
-Skill 自动加载后，日常修改无需输入命令。若项目根目录存在 `AGENTS.md`，Skill 会遵守其中规则；同时遵守 `.editorconfig`、`.gitattributes` 和（如果存在）`.vscode/settings.json`，保护旧文件原始编码、BOM 和换行，禁止无关格式化和大面积 diff。`AGENTS.md` 是可选文件，不会自动创建；用户需要时可自行创建并写入项目规则。
+Skill 自动加载后，纯对话只执行轻量路由，不读取当前目录或项目配置。任务实际访问本地项目时，才按需读取
+根目录 `AGENTS.md`；发生文件修改时再加载通用文件守护，并遵守 `.editorconfig`、`.gitattributes` 和
+可选的 `.vscode/settings.json`，保护旧文件原始编码、BOM 和换行。C++、PowerShell/批处理及 Git 操作规则
+只在对应目标或操作出现时加载。`AGENTS.md` 是可选文件，不会自动创建。
 
 如果 Git 的 `core.autocrlf` 或 `core.eol` 会自动转换工作区，检查会先告警，暂存检查会阻止提交；先在仓库 local 配置中关闭转换并重新确认 diff。Git 索引无法保存历史工作区的原始换行，工具不会猜测或批量修复。
 

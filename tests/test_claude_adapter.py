@@ -45,20 +45,28 @@ import sync_codex_plugin  # noqa: E402
 class ClaudeAdapterTests(unittest.TestCase):
     """验证 Claude 插件适配包和 SessionStart 调用链。"""
 
-    def test_main_skill_is_self_contained_and_uses_section_source(self) -> None:
-        """主 Skill 应自包含详细规则，不再要求新会话读取第二份规则文件。"""
+    def test_main_skill_is_a_small_router_with_progressive_disclosure(self) -> None:
+        """每会话加载的入口只保留路由，详细规则按任务进入上下文。"""
         skill_root = ROOT / "skills" / "jojo-code-guard"
         skill_text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
 
-        self.assertNotIn("通用规则.md", skill_text)
+        routed_references = (
+            "references/通用文件守护.md",
+            "references/C++专项规则.md",
+            "references/Git操作规则.md",
+        )
+        self.assertLess(len(skill_text.encode("utf-8")), 6000)
+        for reference in routed_references:
+            self.assertIn(reference, skill_text)
+            self.assertTrue((skill_root / reference).is_file(), reference)
         self.assertIn("[PowerShell规则.md](PowerShell规则.md)", skill_text)
-        self.assertIn("[references/usage.md](references/usage.md)", skill_text)
-        for detailed_rule in (
+        self.assertIn("references/usage.md", skill_text)
+        for deferred_detail in (
             "JOJO_CODE_GUARD_ALLOW_MIGRATIONS",
-            "PostToolUse/Stop 为 60 秒",
-            "--sync-global-rules",
+            "工程决策原则",
+            "Git 提交规范",
         ):
-            self.assertIn(detailed_rule, skill_text)
+            self.assertNotIn(deferred_detail, skill_text)
         self.assertFalse((skill_root / "通用规则.md").exists())
         self.assertTrue((skill_root / "references" / "自动加载规则.md").is_file())
         self.assertFalse((skill_root / "references" / "全局规则.md").exists())
@@ -135,6 +143,48 @@ class ClaudeAdapterTests(unittest.TestCase):
                 [path for path in parent.iterdir() if path.name.startswith(".adapter.sync-")],
                 [],
             )
+
+    def test_adapter_validation_requires_routed_references(self) -> None:
+        """适配包不能遗漏主 Skill 按场景加载的守护模块。"""
+        validators = (
+            sync_claude_plugin._validate_adapter,
+            sync_codex_plugin._validate_adapter,
+        )
+        relative_paths = (
+            Path("skills/jojo-code-guard/references/通用文件守护.md"),
+            Path("skills/jojo-code-guard/references/C++专项规则.md"),
+            Path("skills/jojo-code-guard/references/Git操作规则.md"),
+        )
+        for validator in validators:
+            for relative in relative_paths:
+                with self.subTest(validator=validator.__module__, relative=str(relative)):
+                    with tempfile.TemporaryDirectory() as directory:
+                        destination = Path(directory)
+                        for required in (
+                            Path(".claude-plugin/plugin.json"),
+                            Path(".claude-plugin/marketplace.json"),
+                            Path(".codex-plugin/plugin.json"),
+                            Path("hooks/hooks.json"),
+                            Path("hooks/session-start"),
+                            Path("hooks/post-write-check"),
+                            Path("hooks/run-hook.cmd"),
+                            Path("skills/jojo-code-guard/SKILL.md"),
+                            Path("skills/jojo-code-guard/references/自动加载规则.md"),
+                            Path("skills/jojo-code-guard/scripts/check_diff.py"),
+                            Path("skills/jojo-code-guard/scripts/guard_core.py"),
+                            Path("skills/jojo-code-guard/scripts/hook_baseline.py"),
+                        ):
+                            path = destination / required
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            path.write_bytes(b"fixture\n")
+                        for routed in relative_paths:
+                            path = destination / routed
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            path.write_bytes(b"fixture\n")
+                        (destination / relative).unlink()
+
+                        with self.assertRaises(FileNotFoundError):
+                            validator(destination)
 
     def test_codex_sync_removes_obsolete_skill(self) -> None:
         """Codex 同步包应包含主 Skill，且不得保留旧 Skill。"""
@@ -718,8 +768,8 @@ class ClaudeAdapterTests(unittest.TestCase):
             session_payload = json.loads(session.stdout.decode("utf-8"))
             session_context = session_payload["hookSpecificOutput"]["additionalContext"]
             self.assertIn("<JOJO_CODE_GUARD_LOAD_INSTRUCTION>", session_context)
-            self.assertIn("当前项目规则：", session_context)
-            self.assertIn("AGENTS.md", session_context)
+            self.assertNotIn("候选项目规则：", session_context)
+            self.assertNotIn("AGENTS.md", session_context)
             self.assertNotIn("Codex 项目规则", session_context)
             self.assertLess(len(session_context.encode("utf-8")), 2500)
 
@@ -798,8 +848,8 @@ class ClaudeAdapterTests(unittest.TestCase):
             self.assertEqual(session.returncode, 0, session.stderr.decode("utf-8", errors="replace"))
             session_payload = json.loads(session.stdout.decode("utf-8"))
             session_context = session_payload["hookSpecificOutput"]["additionalContext"]
-            self.assertIn("当前项目规则：", session_context)
-            self.assertIn("AGENTS.md", session_context)
+            self.assertNotIn("候选项目规则：", session_context)
+            self.assertNotIn("AGENTS.md", session_context)
             self.assertNotIn("Windows 项目规则", session_context)
             self.assertLess(len(session_context.encode("utf-8")), 2500)
 
@@ -903,6 +953,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                     sync_claude_plugin.main()
             environment = os.environ.copy()
             environment["CLAUDE_PLUGIN_ROOT"] = str(plugin_root)
+            environment["CLAUDE_PROJECT_DIR"] = str(project)
             manifest = json.loads((plugin_root / "hooks" / "hooks.json").read_text(encoding="utf-8"))
             command = manifest["hooks"]["SessionStart"][0]["hooks"][0]["command"]
 
@@ -921,10 +972,10 @@ class ClaudeAdapterTests(unittest.TestCase):
             self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
             context = payload["hookSpecificOutput"]["additionalContext"]
             self.assertTrue(context.startswith("<JOJO_CODE_GUARD_LOAD_INSTRUCTION>"))
-            self.assertIn("必需 Skill：", context)
+            self.assertIn("必需路由 Skill：", context)
             self.assertIn("skills/jojo-code-guard/SKILL.md", context.replace("\\", "/"))
             self.assertNotIn("通用规则", context)
-            self.assertIn("当前项目规则：", context)
+            self.assertIn("候选项目规则：", context)
             self.assertIn("AGENTS.md", context)
             self.assertNotIn("PROJECT_RULE_SENTINEL", context)
             self.assertNotIn("name: jojo-code-guard", context)
@@ -942,6 +993,40 @@ class ClaudeAdapterTests(unittest.TestCase):
             self.assertLess(len(context.encode("utf-8")), 2500)
             self.assertLess(len(context), 10000)
             self.assertTrue(context.endswith("</JOJO_CODE_GUARD_LOAD_INSTRUCTION>"))
+
+    def test_session_start_without_explicit_project_does_not_bind_cwd_rules(self) -> None:
+        """纯会话不能把客户端碰巧提供的当前目录误认为用户项目。"""
+        with tempfile.TemporaryDirectory(prefix="jojo chat cwd ") as directory:
+            root = Path(directory)
+            project = root / "incidental-repo"
+            plugin_root = root / "plugin"
+            project.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=project, check=True)
+            (project / "AGENTS.md").write_text("INCIDENTAL_PROJECT_RULE\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"JOJO_CLAUDE_PLUGIN_DIR": str(plugin_root)}):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    sync_claude_plugin.main()
+            environment = os.environ.copy()
+            environment["CLAUDE_PLUGIN_ROOT"] = str(plugin_root)
+            environment.pop("CLAUDE_PROJECT_DIR", None)
+
+            result = subprocess.run(
+                [BASH, str(plugin_root / "hooks" / "session-start")],
+                cwd=project,
+                env=environment,
+                input=b"{}",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+            payload = json.loads(result.stdout.decode("utf-8"))
+            context = payload["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("skills/jojo-code-guard/SKILL.md", context.replace("\\", "/"))
+            self.assertNotIn("候选项目规则：", context)
+            self.assertNotIn("AGENTS.md", context)
+            self.assertNotIn("INCIDENTAL_PROJECT_RULE", context)
 
     def test_session_start_reports_missing_skill_to_model(self) -> None:
         """Skill 资源缺失时应向模型注入暂停要求，不能静默继续。"""
