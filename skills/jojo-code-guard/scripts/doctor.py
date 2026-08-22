@@ -31,15 +31,16 @@ REMOTE_PLUGIN_MANIFEST_URL = (
     "https://raw.githubusercontent.com/zackxjxc/jojo-code-guard/master/.claude-plugin/plugin.json"
 )
 PLUGIN_RESOURCE_SHA256 = {
-    "hooks/hooks.json": "46f1d12396e4d2a981f75e983c986388816b85c474256c8fc7d40037e2b0d468",
+    "hooks/hooks.json": "85d2aa67269ba75b1e176b8fb34cead14b1e174c56356addf05f9228fdf9ccdc",
     "hooks/session-start": "1b94c274e5a401f43b57a0deb989a450662a5375cc0b8586792b392b63a0bd4e",
-    "hooks/post-write-check": "08ee075a1101b847efccc6b0c39ca85e49158dc6202296f17a6e12ff522a8fdb",
+    "hooks/post-write-check": "6a01641c84ae4353de69465e2727e6361e891776e4c1202ce94ddecd348fd7ca",
     "hooks/run-hook.cmd": "9ca38a90bf001ddc017dcac21014ef4aa50126ce8d7cc7dc606666f44efe7d1b",
-    "skills/jojo-code-guard/SKILL.md": "43b55279650a1fe20ea4ebc354316e7f9afe671756288caf8a49001bae98f817",
+    "skills/jojo-code-guard/SKILL.md": "ff8e8b46822d6a6c3a4337bc9cba64540902b736719ac844e6b95f5f49283f1c",
     "skills/jojo-code-guard/PowerShell规则.md": "fce51181a71684323c612a5f1d4aa311fca2be15fa1fe6e6d156937c9d19c416",
     "skills/jojo-code-guard/references/自动加载规则.md": "18bc671c2b492d2ea0d6ea7bccd6d65825f3c1f1b9a7e7a23931a2ec43889aca",
     "skills/jojo-code-guard/scripts/check_diff.py": "f3949b144cf69fed40aaffff34146c6f624bfab3d2f9f5709ff3024e5e6f911d",
     "skills/jojo-code-guard/scripts/guard_core.py": "52bf8487fc218aa4134c4c5891f8700c2f56c9fc49ea7642854c0e0041c44f81",
+    "skills/jojo-code-guard/scripts/hook_baseline.py": "7f95628833e04decd47afe349dafd96e3c8b4a99ea604cb2816131d20c320317",
     "skills/jojo-code-guard/scripts/hook_check.py": "aae71657777aa0cae609cc00d7cefc273b4d3ee2afc59b06d20984c8c3b9d0ca",
     "skills/jojo-code-guard/scripts/install_hook.py": "c351b91d2236d51e717f19787fd15ac87a16d77a12d4c96b42396b5669c6ecb9",
 }

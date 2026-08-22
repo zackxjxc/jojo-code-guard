@@ -208,6 +208,12 @@ class ClaudeAdapterTests(unittest.TestCase):
         """共享 manifest 应在文件、shell 写入后检查，并在回合结束前兜底。"""
         data = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
         entries = data["hooks"]["PostToolUse"]
+        prompt_entry = data["hooks"]["UserPromptSubmit"][0]
+        prompt_handler = prompt_entry["hooks"][0]
+
+        self.assertNotIn("matcher", prompt_entry)
+        self.assertIn("post-write-check", prompt_handler["command"])
+        self.assertEqual(prompt_handler["timeout"], 60)
 
         self.assertEqual(len(entries), 1)
         self.assertEqual(
@@ -427,7 +433,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                         "cwd": str(project),
                         "hook_event_name": "Stop",
                         "stop_hook_active": False,
-                        "last_assistant_message": 'example: "stop_hook_active": true',
+                        "last_assistant_message": "ORIGINAL_AUDIT_ANSWER",
                     }
                 ).encode("utf-8"),
                 stdout=subprocess.PIPE,
@@ -442,7 +448,146 @@ class ClaudeAdapterTests(unittest.TestCase):
         self.assertIn("PURE_TEXT_REWRITE", payload["reason"])
         self.assertIn("已有修改不等于本轮污染", payload["reason"])
         self.assertIn("不得自动恢复、覆盖或删除来源不明", payload["reason"])
+        self.assertIn("ORIGINAL_AUDIT_ANSWER", payload["reason"])
+        self.assertIn("不得只回复守护修复结果", payload["reason"])
         self.assertNotIn("hookSpecificOutput", payload)
+
+    def test_preexisting_batch_problem_does_not_block_read_only_turn(self) -> None:
+        """回合开始前已有的批处理问题只能反馈为警告，不能阻断只读答案。"""
+        with tempfile.TemporaryDirectory(prefix="jojo preexisting stop ") as directory:
+            project = Path(directory)
+            subprocess.run(["git", "init", "--quiet"], cwd=project, check=True)
+            subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=project, check=True)
+            (project / ".gitattributes").write_text(
+                "* -text\n*.bat text eol=crlf\n", encoding="utf-8"
+            )
+            (project / "legacy.bat").write_bytes(b"@echo off\necho legacy\n")
+            subprocess.run(["git", "add", "."], cwd=project, check=True)
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=jojo-test", "-c", "user.email=jojo@example.com",
+                    "commit", "-qm", "base",
+                ],
+                cwd=project,
+                check=True,
+            )
+            environment = os.environ.copy()
+            environment["PLUGIN_ROOT"] = str(ROOT)
+            environment["JOJO_CODE_GUARD_BASELINE_DIR"] = str(project / ".git" / "jojo-baselines")
+            common_input = {
+                "cwd": str(project),
+                "session_id": "session-preexisting",
+                "turn_id": "turn-read-only",
+            }
+            baseline = subprocess.run(
+                [BASH, str(ROOT / "hooks" / "post-write-check")],
+                cwd=project,
+                env=environment,
+                input=json.dumps({**common_input, "hook_event_name": "UserPromptSubmit"}).encode("utf-8"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            baseline_files = list((project / ".git" / "jojo-baselines").glob("*.json"))
+            self.assertEqual(len(baseline_files), 1, baseline.stderr.decode("utf-8", errors="replace"))
+            post = subprocess.run(
+                [BASH, str(ROOT / "hooks" / "post-write-check")],
+                cwd=project,
+                env=environment,
+                input=json.dumps({**common_input, "hook_event_name": "PostToolUse"}).encode("utf-8"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            stop = subprocess.run(
+                [BASH, str(ROOT / "hooks" / "post-write-check")],
+                cwd=project,
+                env=environment,
+                input=json.dumps(
+                    {
+                        **common_input,
+                        "hook_event_name": "Stop",
+                        "stop_hook_active": False,
+                        "last_assistant_message": "READ_ONLY_AUDIT_ANSWER",
+                    }
+                ).encode("utf-8"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+        self.assertEqual(baseline.returncode, 0, baseline.stderr.decode("utf-8", errors="replace"))
+        self.assertEqual(baseline.stdout, b"")
+        self.assertEqual(post.returncode, 0, post.stderr.decode("utf-8", errors="replace"))
+        post_payload = json.loads(post.stdout.decode("utf-8"))
+        self.assertNotIn("decision", post_payload)
+        context = post_payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn('"origin": "pre_existing"', context)
+        self.assertIn('"introduced_by_current_turn": false', context)
+        self.assertEqual(stop.returncode, 0, stop.stderr.decode("utf-8", errors="replace"))
+        self.assertEqual(stop.stdout, b"")
+
+    def test_changed_preexisting_problem_remains_blocking(self) -> None:
+        """本轮改动历史问题文件但仍保留问题时，文件指纹变化必须继续阻断。"""
+        with tempfile.TemporaryDirectory(prefix="jojo worsened stop ") as directory:
+            project = Path(directory)
+            subprocess.run(["git", "init", "--quiet"], cwd=project, check=True)
+            subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=project, check=True)
+            (project / ".gitattributes").write_text(
+                "* -text\n*.bat text eol=crlf\n", encoding="utf-8"
+            )
+            script = project / "legacy.bat"
+            script.write_bytes(b"@echo off\necho legacy\n")
+            subprocess.run(["git", "add", "."], cwd=project, check=True)
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=jojo-test", "-c", "user.email=jojo@example.com",
+                    "commit", "-qm", "base",
+                ],
+                cwd=project,
+                check=True,
+            )
+            environment = os.environ.copy()
+            environment["PLUGIN_ROOT"] = str(ROOT)
+            environment["JOJO_CODE_GUARD_BASELINE_DIR"] = str(project / ".git" / "jojo-baselines")
+            common_input = {
+                "cwd": str(project),
+                "session_id": "session-worsened",
+                "turn_id": "turn-edit",
+            }
+            baseline = subprocess.run(
+                [BASH, str(ROOT / "hooks" / "post-write-check")],
+                cwd=project,
+                env=environment,
+                input=json.dumps({**common_input, "hook_event_name": "UserPromptSubmit"}).encode("utf-8"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(baseline.returncode, 0, baseline.stderr.decode("utf-8", errors="replace"))
+            script.write_bytes(b"@echo off\necho changed this turn\n")
+            stop = subprocess.run(
+                [BASH, str(ROOT / "hooks" / "post-write-check")],
+                cwd=project,
+                env=environment,
+                input=json.dumps(
+                    {
+                        **common_input,
+                        "hook_event_name": "Stop",
+                        "stop_hook_active": False,
+                        "last_assistant_message": "EDIT_RESULT",
+                    }
+                ).encode("utf-8"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+        self.assertEqual(stop.returncode, 0, stop.stderr.decode("utf-8", errors="replace"))
+        payload = json.loads(stop.stdout.decode("utf-8"))
+        self.assertEqual(payload["decision"], "block")
+        self.assertIn("BATCH_EOL", payload["reason"])
+        self.assertNotIn('"origin": "pre_existing"', payload["reason"])
 
     def test_stop_check_reentry_is_silent(self) -> None:
         """Stop 已经要求继续一次后必须静默放行，避免形成无限循环。"""

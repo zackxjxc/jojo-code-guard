@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 文件工具完成或 AI 回合结束时运行差异检查，并返回对应的 Hook 协议。
+# 回合开始时记录差异基线，文件工具完成或 AI 回合结束时返回对应的 Hook 协议。
 set -u
 
 # 先读取一次事件输入，后续同时解析 cwd 和 Stop 重入标记。
@@ -31,7 +31,9 @@ print(value if isinstance(value, str) else "")
 ' 2>/dev/null || true)"
 fi
 HOOK_EVENT="${HOOK_EVENT:-PostToolUse}"
-if [ "$HOOK_EVENT" != "PostToolUse" ] && [ "$HOOK_EVENT" != "Stop" ]; then
+if [ "$HOOK_EVENT" != "UserPromptSubmit" ] \
+    && [ "$HOOK_EVENT" != "PostToolUse" ] \
+    && [ "$HOOK_EVENT" != "Stop" ]; then
     echo "jojo-code-guard: unsupported hook event: ${HOOK_EVENT}" >&2
     exit 2
 fi
@@ -46,6 +48,7 @@ fi
 # 客户端在 Windows 可能传入反斜杠路径，先转换为 Bash 可识别的形式
 PLUGIN_ROOT="${PLUGIN_ROOT//\\\\//}"
 CHECK_SCRIPT="${PLUGIN_ROOT}/skills/jojo-code-guard/scripts/check_diff.py"
+BASELINE_SCRIPT="${PLUGIN_ROOT}/skills/jojo-code-guard/scripts/hook_baseline.py"
 
 if [ "$HOOK_EVENT" = "Stop" ]; then
     STOP_HOOK_ACTIVE="$(printf '%s' "$HOOK_INPUT" | PYTHONIOENCODING=utf-8 "${PYTHON[@]}" -c '
@@ -102,10 +105,73 @@ if ! PROJECT_ROOT="$(git -C "$PROJECT_ROOT" rev-parse --show-toplevel 2>/dev/nul
     exit 0
 fi
 
+read_hook_field() {
+    printf '%s' "$HOOK_INPUT" | PYTHONIOENCODING=utf-8 "${PYTHON[@]}" -c '
+import json
+import sys
+
+try:
+    value = json.load(sys.stdin).get(sys.argv[1], "")
+except (AttributeError, json.JSONDecodeError, UnicodeDecodeError):
+    value = ""
+print(value if isinstance(value, str) else "")
+' "$1" 2>/dev/null || true
+}
+
+SESSION_ID="$(read_hook_field session_id)"
+TURN_ID="$(read_hook_field turn_id)"
+
 set +e
 OUTPUT="$("${PYTHON[@]}" "$CHECK_SCRIPT" --repo "$PROJECT_ROOT" --json 2>&1)"
 STATUS=$?
 set -e
+
+# 用户提示提交发生在本轮工具调用之前；只记录基线，不阻断或改写用户请求。
+if [ "$HOOK_EVENT" = "UserPromptSubmit" ]; then
+    if [ -r "$BASELINE_SCRIPT" ]; then
+        # 先覆盖同键旧缓存；即使本次检查或实际记录失败，后续也只能按严格模式处理。
+        printf '[]' | PYTHONIOENCODING=utf-8 "${PYTHON[@]}" "$BASELINE_SCRIPT" record \
+            --repo "$PROJECT_ROOT" --session-id "$SESSION_ID" --turn-id "$TURN_ID" \
+            >/dev/null 2>&1 || true
+        if [ "$STATUS" -le 1 ]; then
+            printf '%s' "$OUTPUT" | PYTHONIOENCODING=utf-8 "${PYTHON[@]}" "$BASELINE_SCRIPT" record \
+                --repo "$PROJECT_ROOT" --session-id "$SESSION_ID" --turn-id "$TURN_ID" \
+                >/dev/null 2>&1 || true
+        fi
+    fi
+    exit 0
+fi
+
+# 基线缺失或过滤失败时保持原始严格诊断，避免把本轮污染误降级。
+if [ "$STATUS" -le 1 ] && [ -r "$BASELINE_SCRIPT" ]; then
+    if FILTERED_OUTPUT="$(
+        printf '%s' "$OUTPUT" | PYTHONIOENCODING=utf-8 "${PYTHON[@]}" "$BASELINE_SCRIPT" filter \
+            --repo "$PROJECT_ROOT" --session-id "$SESSION_ID" --turn-id "$TURN_ID" 2>/dev/null
+    )"; then
+        OUTPUT="$FILTERED_OUTPUT"
+        if FILTERED_BLOCKED="$(printf '%s' "$OUTPUT" | PYTHONIOENCODING=utf-8 "${PYTHON[@]}" -c '
+import json
+import sys
+
+try:
+    diagnostics = json.load(sys.stdin)
+except (json.JSONDecodeError, UnicodeDecodeError):
+    raise SystemExit(1)
+if not isinstance(diagnostics, list):
+    raise SystemExit(1)
+print("true" if any(
+    isinstance(item, dict) and item.get("level") == "BLOCKED"
+    for item in diagnostics
+) else "false")
+' 2>/dev/null)"; then
+            if [ "$FILTERED_BLOCKED" = "true" ]; then
+                STATUS=1
+            else
+                STATUS=0
+            fi
+        fi
+    fi
+fi
 
 BLOCKED=false
 if [ "$STATUS" -ge 2 ]; then
@@ -128,7 +194,7 @@ else
         CONTEXT="$(printf 'jojo-code-guard: 工具完成后的工作区检查结果：\n%s' "$OUTPUT")"
     fi
     if BLOCKED_RESULT="$(
-        printf '%s' "$OUTPUT" | "${PYTHON[@]}" -c '
+        printf '%s' "$OUTPUT" | PYTHONIOENCODING=utf-8 "${PYTHON[@]}" -c '
 import json
 import sys
 
@@ -155,6 +221,17 @@ CONTEXT="${CONTEXT}
 # Stop 只在阻断时要求继续处理；PostToolUse 会把所有诊断立即反馈给 AI。
 if [ "$HOOK_EVENT" = "Stop" ] && [ "$BLOCKED" != "true" ]; then
     exit 0
+fi
+if [ "$HOOK_EVENT" = "Stop" ] && [ "$BLOCKED" = "true" ]; then
+    LAST_ASSISTANT_MESSAGE="$(read_hook_field last_assistant_message)"
+    if [ -n "$LAST_ASSISTANT_MESSAGE" ]; then
+        CONTEXT="${CONTEXT}
+这是 jojo-code-guard 触发的内部续跑，不是用户提出的新需求。客户端提供的待交付答案如下：
+<JOJO_PENDING_FINAL_RESPONSE>
+${LAST_ASSISTANT_MESSAGE}
+</JOJO_PENDING_FINAL_RESPONSE>
+处理可可靠归因且已获授权的阻断项后，必须继续完成原用户请求并重新交付上述答案；守护说明只能作为附注，不得只回复守护修复结果。"
+    fi
 fi
 if ! printf '%s' "$CONTEXT" \
     | JOJO_HOOK_EVENT="$HOOK_EVENT" JOJO_HOOK_BLOCKED="$BLOCKED" PYTHONIOENCODING=utf-8 \

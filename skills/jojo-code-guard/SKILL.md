@@ -43,10 +43,14 @@ description: Load automatically at the start of every session and apply to every
   相应的 Git、编码和差异检查。
 - 自动守护只做轻量、只读的编辑前后保护：记录目标文件原始编码、BOM 和换行，执行
   `git status --short` 与 `git diff --stat`，编辑后核对 diff 范围。
-- 插件在已知编辑和 shell 工具完成后由 `PostToolUse` 运行 `post-write-check`，把诊断反馈给 AI；
-  `BLOCKED` 要求 AI 继续修复，但 Hook 不能撤销已经完成的写入。
+- 插件在 `UserPromptSubmit` 先记录本回合工作区诊断与相关文件指纹，再在已知编辑和 shell 工具完成后
+  由 `PostToolUse` 运行 `post-write-check`，把诊断反馈给 AI；`BLOCKED` 要求 AI 继续修复，但 Hook
+  不能撤销已经完成的写入。
+- 同一诊断及其文件指纹从回合开始起均未变化时，Hook 将其标记为 `pre_existing` 并降级为
+  `WARNING`；本轮改动过问题文件、出现新诊断、基线缺失或基线损坏时仍保持严格阻断。
 - `Stop` 在 AI 回合准备结束时再检查一次，捕获外部脚本或未识别工具的写入；收到
-  `stop_hook_active` 重入标记时直接放行，避免循环。
+  `stop_hook_active` 重入标记时直接放行，避免循环。真正阻断时必须保留 `last_assistant_message`，修复后
+  继续完成原请求并重新交付原答案，不得把内部守护续跑误当成用户的新需求。
 - Codex 仍使用原生 Skill Discovery。Claude/Codex 生命周期 Hook 是否执行取决于客户端版本、功能开关、
   信任状态和策略，不能将其视为确定性前提。Hook 未执行时，AI 必须在每次写入后运行
   `check_diff.py`，再继续思考或编辑。
@@ -62,8 +66,9 @@ description: Load automatically at the start of every session and apply to every
 
 1. 修改前读取仓库规则和 `git status --short`，确认目标文件原始编码、BOM、换行及用户已有修改。
 2. 只用最小补丁写入目标文件，不调用会批量格式化或统一换行的工具。
-3. 修改后由 `PostToolUse` 自动检查，回合结束前由 `Stop` 兜底；Hook 不可用时，在每次写入后运行
-   `python "<jojo-code-guard>/scripts/check_diff.py" --repo .`。该检查也会发现权限位或文件类型的意外变化。
+3. 回合开始由 `UserPromptSubmit` 记录基线；修改后由 `PostToolUse` 自动检查，回合结束前由 `Stop`
+   兜底。Hook 不可用时，在每次写入后运行 `python "<jojo-code-guard>/scripts/check_diff.py" --repo .`。
+   该检查也会发现权限位或文件类型的意外变化。
 4. 发现 `BLOCKED`、整文件变化或未授权文件变化时，不继续交付、提交或推送，先修复并重新检查。
 
 ## 仓库编码与换行

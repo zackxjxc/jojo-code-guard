@@ -41,6 +41,7 @@ def _validate_adapter(destination: pathlib.Path) -> None:
         destination / "hooks" / "run-hook.cmd",
         destination / "skills" / "jojo-code-guard" / "SKILL.md",
         destination / "skills" / "jojo-code-guard" / "references" / "自动加载规则.md",
+        destination / "skills" / "jojo-code-guard" / "scripts" / "hook_baseline.py",
     )
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
