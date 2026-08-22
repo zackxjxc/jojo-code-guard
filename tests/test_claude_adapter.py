@@ -45,13 +45,21 @@ import sync_codex_plugin  # noqa: E402
 class ClaudeAdapterTests(unittest.TestCase):
     """验证 Claude 插件适配包和 SessionStart 调用链。"""
 
-    def test_main_skill_loads_common_rules_and_uses_section_source(self) -> None:
-        """主 Skill 应自动加载通用规则，doctor 只保留自动加载节源。"""
+    def test_main_skill_is_self_contained_and_uses_section_source(self) -> None:
+        """主 Skill 应自包含详细规则，不再要求新会话读取第二份规则文件。"""
         skill_root = ROOT / "skills" / "jojo-code-guard"
         skill_text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
 
-        self.assertIn("[通用规则.md](通用规则.md)", skill_text)
-        self.assertTrue((skill_root / "通用规则.md").is_file())
+        self.assertNotIn("通用规则.md", skill_text)
+        self.assertIn("[PowerShell规则.md](PowerShell规则.md)", skill_text)
+        self.assertIn("[references/usage.md](references/usage.md)", skill_text)
+        for detailed_rule in (
+            "JOJO_CODE_GUARD_ALLOW_MIGRATIONS",
+            "PostToolUse/Stop 为 60 秒",
+            "--sync-global-rules",
+        ):
+            self.assertIn(detailed_rule, skill_text)
+        self.assertFalse((skill_root / "通用规则.md").exists())
         self.assertTrue((skill_root / "references" / "自动加载规则.md").is_file())
         self.assertFalse((skill_root / "references" / "全局规则.md").exists())
 
@@ -90,6 +98,9 @@ class ClaudeAdapterTests(unittest.TestCase):
                 (ROOT / "hooks" / "run-hook.cmd").read_bytes(),
             )
             self.assertFalse((hooks_dir / "run-hook.sh").exists())
+            self.assertFalse(
+                (destination / "skills" / "jojo-code-guard" / "通用规则.md").exists()
+            )
             self.assertFalse(old_skill.exists())
             self.assertFalse(old_commit_skill.exists())
             self.assertTrue(all(not document.exists() for document in obsolete_documents))
@@ -767,6 +778,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             self.assertTrue(context.startswith("<JOJO_CODE_GUARD_LOAD_INSTRUCTION>"))
             self.assertIn("必需 Skill：", context)
             self.assertIn("skills/jojo-code-guard/SKILL.md", context.replace("\\", "/"))
+            self.assertNotIn("通用规则", context)
             self.assertIn("当前项目规则：", context)
             self.assertIn("AGENTS.md", context)
             self.assertNotIn("PROJECT_RULE_SENTINEL", context)
@@ -776,7 +788,7 @@ class ClaudeAdapterTests(unittest.TestCase):
                 for line in context.splitlines()
                 if line.startswith(("1. ", "2. ", "3. "))
             ]
-            self.assertEqual(len(references), 3)
+            self.assertEqual(len(references), 2)
             for reference in references:
                 if os.name == "nt":
                     self.assertRegex(reference, r"^[A-Za-z]:/")

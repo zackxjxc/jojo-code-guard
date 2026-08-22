@@ -70,8 +70,8 @@ Codex 0.142.3 都从包内 `hooks/hooks.json` 发现生命周期 Hook；Codex �
 Hook 功能和信任策略。
 Hook 清单中的 `timeout` 单位是秒。本项目显式使用 SessionStart 10 秒、差异检查 60 秒；如果目标是
 3000 毫秒，应写 `3`，不能写 `3000`，后者会变成 3000 秒。
-主 Skill 加载后会自动读取同目录的 `通用规则.md`；用户级全局文件只负责引导 Skill 自动加载，
-不再承载会随 Skill 演进的通用规则。
+主 `SKILL.md` 自包含仓库守护、编码、换行、工具和 Hook 的完整规则；新会话只需加载这一份主文件。
+PowerShell 规则与使用说明仅在对应任务触发时按需读取。用户级全局文件只负责引导 Skill 自动加载。
 Hook 从业务仓库的当前工作目录启动；Codex 注入 `PLUGIN_ROOT` 和兼容变量
 `CLAUDE_PLUGIN_ROOT`，Claude 使用后者，脚本据此定位插件资源。主 Skill 会要求 AI 在修改前后检查，
 已初始化的 Git pre-commit 可在提交阶段补充机械门禁。
