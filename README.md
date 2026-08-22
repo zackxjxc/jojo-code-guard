@@ -1,6 +1,11 @@
 # jojo-code-guard
 
-啾啾代码守护用于保护 C++ 老项目的编码、BOM、换行和最小 Git diff。
+啾啾代码守护用于保护各种语言项目的编码、BOM、换行和最小 Git diff，重点兼容容易出现混合编码的
+C++ 老项目。
+
+每个会话只加载轻量路由入口：纯对话不读取本地项目；发生文件修改时加载语言无关的通用守护；只有实际
+处理 C++、PowerShell/批处理或 Git 状态操作时，才继续加载对应专项规则。不需要为 TypeScript、Swift、
+Rust 等语言分别维护一套编码规则。
 
 发布仓库中的 `.bat/.cmd` 使用 UTF-8 无 BOM + CRLF，并通过 `.gitattributes` 的 `text eol=crlf` 保证检出结果。
 
@@ -73,8 +78,9 @@ Codex 0.142.3 都从包内 `hooks/hooks.json` 发现生命周期 Hook；Codex �
 Hook 功能和信任策略。
 Hook 清单中的 `timeout` 单位是秒。本项目显式使用 SessionStart 10 秒、差异检查 60 秒；如果目标是
 3000 毫秒，应写 `3`，不能写 `3000`，后者会变成 3000 秒。
-主 `SKILL.md` 自包含仓库守护、编码、换行、工具和 Hook 的完整规则；新会话只需加载这一份主文件。
-PowerShell 规则与使用说明仅在对应任务触发时按需读取。用户级全局文件只负责引导 Skill 自动加载。
+主 `SKILL.md` 只保留暗号检测和场景路由；通用文件守护、C++、PowerShell、Git 及工具说明按本轮任务
+渐进加载。仅仅使用 PowerShell 作为终端外壳、处在 Git 仓库中，或客户端碰巧提供了当前目录，不会加载
+对应专项规则。用户级全局文件只负责引导轻量入口自动加载。
 Hook 从业务仓库的当前工作目录启动；Codex 注入 `PLUGIN_ROOT` 和兼容变量
 `CLAUDE_PLUGIN_ROOT`，Claude 使用后者，脚本据此定位插件资源。主 Skill 会要求 AI 在修改前后检查，
 已初始化的 Git pre-commit 可在提交阶段补充机械门禁。

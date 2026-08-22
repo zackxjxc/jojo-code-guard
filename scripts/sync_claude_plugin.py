@@ -40,6 +40,9 @@ def _validate_adapter(destination: pathlib.Path) -> None:
         destination / "hooks" / "post-write-check",
         destination / "hooks" / "run-hook.cmd",
         destination / "skills" / "jojo-code-guard" / "SKILL.md",
+        destination / "skills" / "jojo-code-guard" / "references" / "通用文件守护.md",
+        destination / "skills" / "jojo-code-guard" / "references" / "C++专项规则.md",
+        destination / "skills" / "jojo-code-guard" / "references" / "Git操作规则.md",
         destination / "skills" / "jojo-code-guard" / "references" / "自动加载规则.md",
         destination / "skills" / "jojo-code-guard" / "scripts" / "hook_baseline.py",
     )

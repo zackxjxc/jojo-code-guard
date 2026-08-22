@@ -1,6 +1,8 @@
 # PowerShell 脚本编写规则（AI 专用 · 覆盖 PS 5.1 + 7.x）
 
-涉及 PowerShell、`.ps1`、`.bat` 或 `.cmd` 的任务，AI 必须先读取本文档，再进行分析、编码和验证，并严格遵守本文档的完整规则与检查清单。
+编写、修改、评审或诊断 `.ps1`、`.psm1`、`.psd1`、`.bat`、`.cmd`，或者设计复杂的 PowerShell
+进程、提权、重定向和跨 shell 命令时，AI 必须先读取本文档，再进行分析、编码和验证。终端外壳碰巧是
+PowerShell，或只用它执行普通的只读命令，不构成本规则的触发条件。
 
 > **适用范围**: Windows 平台 ONLY。macOS / Linux 不使用 PowerShell。
 > **优先版本**: PowerShell 7 (Core)。如目标机器仅安装 PS 5.1，建议提醒用户安装 PS 7：

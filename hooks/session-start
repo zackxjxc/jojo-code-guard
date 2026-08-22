@@ -69,31 +69,31 @@ if [ ! -r "$SKILL_FILE" ]; then
     exit 0
 fi
 
+project_rules=""
 if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
-    project_root="$CLAUDE_PROJECT_DIR"
-else
-    project_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    project_root="${CLAUDE_PROJECT_DIR//\\\\//}"
+    if git_root="$(git -C "$project_root" rev-parse --show-toplevel 2>/dev/null)"; then
+        project_root="$git_root"
+    fi
+    if resolved_project_root="$(absolute_directory "$project_root" 2>/dev/null)"; then
+        project_root="$resolved_project_root"
+    fi
+    if [ -f "${project_root}/AGENTS.md" ]; then
+        project_rules="${project_root}/AGENTS.md"
+    fi
 fi
-project_root="${project_root//\\\\//}"
-if git_root="$(git -C "$project_root" rev-parse --show-toplevel 2>/dev/null)"; then
-    project_root="$git_root"
-fi
-if resolved_project_root="$(absolute_directory "$project_root" 2>/dev/null)"; then
-    project_root="$resolved_project_root"
-fi
-project_rules="${project_root}/AGENTS.md"
 
 # 只注入短加载指令和绝对路径，避免客户端把完整规则溢出到临时文件或截断。
 emit_load_instruction() {
     printf '%s\n' '<JOJO_CODE_GUARD_LOAD_INSTRUCTION>'
-    printf '%s\n' '在生成回复或修改文件前，必须使用可用的文件读取能力依次完整读取并遵守下列文件。'
-    printf '%s\n' '路径提示不等于已加载文件内容，不得仅凭本段摘要继续。'
-    printf '1. 必需 Skill：%s\n' "$SKILL_FILE"
-    if [ -f "$project_rules" ]; then
-        printf '2. 当前项目规则：%s\n' "$project_rules"
+    printf '%s\n' '生成回复前必须完整读取主 Skill；它是轻量路由器，只有命中场景才继续读取对应专项资源。'
+    printf '1. 必需路由 Skill：%s\n' "$SKILL_FILE"
+    if [ -n "$project_rules" ]; then
+        printf '2. 候选项目规则：%s\n' "$project_rules"
+        printf '%s\n' '仅当本轮任务实际访问该项目时读取候选项目规则；纯对话不要读取。'
     fi
     printf '%s\n' '规则优先级：系统/用户明确要求 > 项目规则 > Skill 及按需专项规则。'
-    printf '%s\n' '若任一列出的文件无法完整读取，立即暂停文件修改并向用户报告。'
+    printf '%s\n' '若主 Skill 或本轮命中的资源无法完整读取，立即暂停相关文件或仓库操作并报告。'
     printf '%s\n' '已有修改不等于本轮污染；不得自动恢复、覆盖或删除来源不明的内容。'
     printf '%s\n' '</JOJO_CODE_GUARD_LOAD_INSTRUCTION>'
 }
