@@ -24,6 +24,7 @@ if resolved_plugin_root="$(absolute_directory "$PLUGIN_ROOT" 2>/dev/null)"; then
     PLUGIN_ROOT="$resolved_plugin_root"
 fi
 SKILL_FILE="${PLUGIN_ROOT}/skills/jojo-code-guard/SKILL.md"
+COMMON_RULE_FILE="${PLUGIN_ROOT}/skills/jojo-code-guard/references/通用行为规则.md"
 
 select_python() {
     if command -v py >/dev/null 2>&1 && py -3 -c 'import sys' >/dev/null 2>&1; then
@@ -63,7 +64,15 @@ print(json.dumps(payload, ensure_ascii=False))
 if [ ! -r "$SKILL_FILE" ]; then
     load_error="jojo-code-guard: 无法读取 Skill：${SKILL_FILE}"
     load_context="<JOJO_CODE_GUARD_LOAD_FAILED>${load_error}；"
-    load_context="${load_context}必须暂停文件修改并向用户报告。</JOJO_CODE_GUARD_LOAD_FAILED>"
+    load_context="${load_context}必须暂停当前任务，只报告加载失败并等待处理。</JOJO_CODE_GUARD_LOAD_FAILED>"
+    printf '%s\n' "$load_error" >&2
+    emit_context_payload "$load_context"
+    exit 0
+fi
+if [ ! -r "$COMMON_RULE_FILE" ]; then
+    load_error="jojo-code-guard: 无法读取所有任务通用行为规则：${COMMON_RULE_FILE}"
+    load_context="<JOJO_CODE_GUARD_LOAD_FAILED>${load_error}；"
+    load_context="${load_context}必须暂停当前任务，只报告加载失败并等待处理。</JOJO_CODE_GUARD_LOAD_FAILED>"
     printf '%s\n' "$load_error" >&2
     emit_context_payload "$load_context"
     exit 0
@@ -86,14 +95,15 @@ fi
 # 只注入短加载指令和绝对路径，避免客户端把完整规则溢出到临时文件或截断。
 emit_load_instruction() {
     printf '%s\n' '<JOJO_CODE_GUARD_LOAD_INSTRUCTION>'
-    printf '%s\n' '生成回复前必须完整读取主 Skill；它是轻量路由器，只有命中场景才继续读取对应专项资源。'
+    printf '%s\n' '生成回复前必须完整读取主 Skill；所有任务都必须再完整读取并遵守通用行为规则。'
     printf '1. 必需路由 Skill：%s\n' "$SKILL_FILE"
+    printf '2. 所有任务必需行为基线：%s\n' "$COMMON_RULE_FILE"
     if [ -n "$project_rules" ]; then
-        printf '2. 候选项目规则：%s\n' "$project_rules"
+        printf '3. 候选项目规则：%s\n' "$project_rules"
         printf '%s\n' '仅当本轮任务实际访问该项目时读取候选项目规则；纯对话不要读取。'
     fi
     printf '%s\n' '规则优先级：系统/用户明确要求 > 项目规则 > Skill 及按需专项规则。'
-    printf '%s\n' '若主 Skill 或本轮命中的资源无法完整读取，立即暂停相关文件或仓库操作并报告。'
+    printf '%s\n' '若主 Skill 或通用行为规则无法完整读取，立即暂停当前任务并报告；按需资源缺失时暂停受影响的操作。'
     printf '%s\n' '已有修改不等于本轮污染；不得自动恢复、覆盖或删除来源不明的内容。'
     printf '%s\n' '</JOJO_CODE_GUARD_LOAD_INSTRUCTION>'
 }

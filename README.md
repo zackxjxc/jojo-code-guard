@@ -3,9 +3,10 @@
 啾啾代码守护用于保护各种语言项目的编码、BOM、换行和最小 Git diff，重点兼容容易出现混合编码的
 C++ 老项目。
 
-每个会话只加载轻量路由入口：纯对话不读取本地项目；发生文件修改时加载语言无关的通用守护；只有实际
-处理 C++、PowerShell/批处理或 Git 状态操作时，才继续加载对应专项规则。不需要为 TypeScript、Swift、
-Rust 等语言分别维护一套编码规则。
+每个会话先加载轻量路由入口，并在暗号未命中后为所有任务读取紧凑的通用行为规则；纯对话仍不读取本地
+项目。只读诊断编码、BOM、EOL/换行和当前 diff，或发生文件修改时，再加载语言无关的通用文件守护。
+只有实际处理 C++、PowerShell/批处理或 Git 状态操作时，才继续加载对应专项规则。不需要为 TypeScript、
+Swift、Rust 等语言分别维护一套编码规则。
 
 发布仓库中的 `.bat/.cmd` 使用 UTF-8 无 BOM + CRLF，并通过 `.gitattributes` 的 `text eol=crlf` 保证检出结果。
 
@@ -78,22 +79,22 @@ Codex 0.142.3 都从包内 `hooks/hooks.json` 发现生命周期 Hook；Codex �
 Hook 功能和信任策略。
 Hook 清单中的 `timeout` 单位是秒。本项目显式使用 SessionStart 10 秒、差异检查 60 秒；如果目标是
 3000 毫秒，应写 `3`，不能写 `3000`，后者会变成 3000 秒。
-主 `SKILL.md` 只保留暗号检测和场景路由；通用文件守护、C++、PowerShell、Git 及工具说明按本轮任务
-渐进加载。仅仅使用 PowerShell 作为终端外壳、处在 Git 仓库中，或客户端碰巧提供了当前目录，不会加载
-对应专项规则。用户级全局文件只负责引导轻量入口自动加载。
+主 `SKILL.md` 只保留暗号检测、通用行为入口和场景路由；紧凑的通用行为规则由所有任务读取，通用文件
+守护、C++、PowerShell、Git 及工具说明仍按本轮任务渐进加载。仅仅使用 PowerShell 作为终端外壳、处在
+Git 仓库中，或客户端碰巧提供了当前目录，不会加载对应专项规则。用户级全局文件只负责引导轻量入口自动加载。
 Hook 从业务仓库的当前工作目录启动；Codex 注入 `PLUGIN_ROOT` 和兼容变量
 `CLAUDE_PLUGIN_ROOT`，Claude 使用后者，脚本据此定位插件资源。主 Skill 会要求 AI 在修改前后检查，
 已初始化的 Git pre-commit 可在提交阶段补充机械门禁。
 通过 Bash、外部脚本或其他客户端写文件时，由 AI 在每次写入后自动运行 `check_diff.py`；用户日常不需要输入检查命令。插件 Hook 或 Skill 未加载时，不能声称已经完成自动检查。
 低频操作可以使用 `doctor`、`check-diff` 和 `help`，也可以直接用自然语言提出要求。
 
-新增 `.ps1` 默认采用 UTF-8 无 BOM + LF；只有明确使用 Windows PowerShell 5.1 且包含中文时，用户可自行在项目规则文件中声明 UTF-8 BOM 例外。Visual Studio/MSVC 资源脚本 `.rc/.rc2` 是有意保留的例外：新增文件使用 UTF-8 BOM + LF，避免旧版资源编译链误判中文编码。
+已有 PowerShell 脚本保持原编码、BOM 和换行。新建 `.ps1/.psm1/.psd1` 明确面向 Windows PowerShell 5.1（PS 5.1）且含非 ASCII 字符时使用 UTF-8 BOM + LF；其他新脚本在仓库规则或数据协议未另行要求时使用 UTF-8 无 BOM + LF，Unix shebang 脚本禁止 BOM。Visual Studio/MSVC 资源脚本 `.rc/.rc2` 是有意保留的例外：新增文件使用 UTF-8 BOM + LF，避免旧版资源编译链误判中文编码。
 
 Codex 中会分别显示以下入口：
 
 - `jojo-code-guard`：日常自动守护编码、换行和最小 diff。
-- `jojo-code-guard:doctor`：按需执行设备、Git、仓库和全局规则诊断，确认后只新增或更新
-  jojo-code-guard 自动加载节。
+- `jojo-code-guard:doctor`：默认只读诊断设备、Git、仓库、全局规则和远端版本；用户分别确认后可修复
+  仓库保护、安装 Hook/工具，或只同步 jojo-code-guard 自动加载节。
 - `jojo-code-guard:check-diff`：按需检查编码、换行和未提交 diff。
 - `jojo-code-guard:help`：查看功能和安全边界。
 
@@ -133,8 +134,9 @@ doctor 不会用模板覆盖仓库已有配置。为已有 `.gitattributes` 补�
 
 如果从终端直接运行脚本，必须使用客户端当前实际加载的 Skill 目录中的
 `scripts/doctor.py`，不能假定业务仓库内存在 `skills/jojo-code-guard`。如需让 Codex 每个会话都强制加载
-主 Skill，可先预览并确认一次自动加载节同步；这不是日常命令。已有全局文件只增改该节，标题和其他规则
-保持不变；目标不存在时才创建普通标题：
+主 Skill，可先预览并确认一次自动加载节同步；这不是日常命令。已有全局文件只增改该节，兼容旧标题并
+合并重复节，节外标题和其他规则保持不变；同步保留 UTF-8 BOM 与原换行，遇到混合换行或无法确定节边界
+时拒写，目标不存在时才创建普通标题：
 
 ```text
 请使用 jojo-code-guard 的 doctor 预览 --sync-global-rules；确认差异后再执行同一选项并加 --yes。
