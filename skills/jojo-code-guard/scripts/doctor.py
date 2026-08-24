@@ -48,7 +48,7 @@ PLUGIN_RESOURCE_SHA256 = {
     "skills/jojo-code-guard/scripts/guard_core.py": "52bf8487fc218aa4134c4c5891f8700c2f56c9fc49ea7642854c0e0041c44f81",
     "skills/jojo-code-guard/scripts/hook_baseline.py": "7f95628833e04decd47afe349dafd96e3c8b4a99ea604cb2816131d20c320317",
     "skills/jojo-code-guard/scripts/hook_check.py": "aae71657777aa0cae609cc00d7cefc273b4d3ee2afc59b06d20984c8c3b9d0ca",
-    "skills/jojo-code-guard/scripts/install_hook.py": "c351b91d2236d51e717f19787fd15ac87a16d77a12d4c96b42396b5669c6ecb9",
+    "skills/jojo-code-guard/scripts/install_hook.py": "b2d7b4e0bcb30c004369671c5577ea36a003dc4a93c6254bb45715f6d382057d",
     "skills/jojo-code-guard-doctor/SKILL.md": "b16a6601d323f3dd6b049615dace0b7de8f47bfdc572a35a1ddbddc4713a0791",
     "skills/jojo-code-guard-check-diff/SKILL.md": "73817f07722b44d95e76e4a324d7a0d7a5a1413060e4242a6c88c033b07033fe",
     "skills/jojo-code-guard-help/SKILL.md": "8c383ae710939c68ebd0259d992f5ef701d3fe80fc9e6eaad17cabd118b76091",
@@ -3426,6 +3426,141 @@ def _template(name: str) -> bytes:
     return templates[name].encode("utf-8")
 
 
+def _repair_file_identity(path: Path, label: str) -> tuple[int, ...] | None:
+    """记录待修复规则文件身份，并拒绝链接、reparse 和多链接对象。"""
+    _assert_global_rule_path_safe(path)
+    try:
+        details = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(details.st_mode):
+        raise RuntimeError(f"{label}不是普通文件：{path}")
+    if details.st_nlink != 1:
+        raise RuntimeError(f"{label}是硬链接或多链接文件：{path}")
+    return (
+        int(details.st_dev),
+        int(details.st_ino),
+        int(stat.S_IFMT(details.st_mode)),
+        int(details.st_size),
+        int(details.st_mtime_ns),
+        int(details.st_nlink),
+    )
+
+
+def _write_missing_repair_template(path: Path, data: bytes, label: str) -> None:
+    """用 O_EXCL 创建缺失模板，拒绝最后窗口出现的链接或文件。"""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags, 0o666)
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError as error:
+        raise RuntimeError(f"无法独占创建{label}：{path}") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if _repair_file_identity(path, label) is None or path.read_bytes() != data:
+        raise RuntimeError(f"{label}创建后复核失败：{path}")
+
+
+def _read_verified_repair_file(
+    path: Path,
+    expected: tuple[int, ...],
+    label: str,
+) -> tuple[bytes, str | None]:
+    """从身份已钉住的普通文件读取严格 UTF-8 文本。"""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        opened_identity = (
+            int(opened.st_dev),
+            int(opened.st_ino),
+            int(stat.S_IFMT(opened.st_mode)),
+            int(opened.st_size),
+            int(opened.st_mtime_ns),
+            int(opened.st_nlink),
+        )
+        if opened_identity != expected or not stat.S_ISREG(opened.st_mode):
+            raise RuntimeError(f"{label}在读取前发生变化：{path}")
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            data = stream.read()
+            after = os.fstat(stream.fileno())
+            after_identity = (
+                int(after.st_dev),
+                int(after.st_ino),
+                int(stat.S_IFMT(after.st_mode)),
+                int(after.st_size),
+                int(after.st_mtime_ns),
+                int(after.st_nlink),
+            )
+            if after_identity != expected:
+                raise RuntimeError(f"{label}在读取期间发生变化：{path}")
+    except OSError as error:
+        raise RuntimeError(f"无法安全读取{label}：{path}") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if _repair_file_identity(path, label) != expected:
+        raise RuntimeError(f"{label}路径在读取期间发生变化：{path}")
+    try:
+        text = data.decode("utf-8-sig", errors="strict")
+    except UnicodeDecodeError:
+        text = None
+    return data, text
+
+
+def _append_verified_repair_file(
+    path: Path,
+    expected: tuple[int, ...],
+    original: bytes,
+    addition: str,
+    label: str,
+) -> None:
+    """通过钉住的普通文件描述符追加文本，并复核没有越界或并发改写。"""
+    flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    addition_data = addition.encode("utf-8")
+    try:
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        opened_identity = (
+            int(opened.st_dev),
+            int(opened.st_ino),
+            int(stat.S_IFMT(opened.st_mode)),
+            int(opened.st_size),
+            int(opened.st_mtime_ns),
+            int(opened.st_nlink),
+        )
+        if opened_identity != expected or not stat.S_ISREG(opened.st_mode):
+            raise RuntimeError(f"{label}在写入前发生变化：{path}")
+        pending = memoryview(addition_data)
+        while pending:
+            written = os.write(descriptor, pending)
+            if written <= 0:
+                raise OSError(f"追加{label}时没有进展")
+            pending = pending[written:]
+        os.fsync(descriptor)
+    except OSError as error:
+        raise RuntimeError(f"无法安全追加{label}：{path}") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    current = _repair_file_identity(path, label)
+    if current is None or current[:3] != expected[:3]:
+        raise RuntimeError(f"{label}写入后身份发生变化：{path}")
+    if path.read_bytes() != original + addition_data:
+        raise RuntimeError(f"{label}写入后内容复核失败：{path}")
+
+
 def _attributes_repair_preview(repo: Path) -> str | None:
     """返回批处理属性修复的拟议差异，不修改仓库。"""
     path = repo / ".gitattributes"
@@ -3466,13 +3601,26 @@ def _attributes_repair_preview(repo: Path) -> str | None:
 def repair_repo(repo: Path, install_hook: bool = False) -> list[str]:
     """创建缺失规则文件，并校正已明确授权的仓库本地 Git 保护项。"""
     created: list[str] = []
+    paths = {name: repo / name for name in (".editorconfig", ".gitattributes", ".gitignore")}
+    identities = {
+        name: _repair_file_identity(path, name)
+        for name, path in paths.items()
+    }
     for name in (".editorconfig", ".gitattributes", ".gitignore"):
-        path = repo / name
-        if not path.exists():
-            path.write_bytes(_template(name))
+        path = paths[name]
+        if identities[name] is None:
+            _write_missing_repair_template(path, _template(name), name)
+            identities[name] = _repair_file_identity(path, name)
             created.append(name)
     attributes_path = repo / ".gitattributes"
-    attributes = _read_utf8(attributes_path)
+    attributes_identity = identities[".gitattributes"]
+    if attributes_identity is None:
+        raise RuntimeError(f".gitattributes 创建后身份缺失：{attributes_path}")
+    attributes_data, attributes = _read_verified_repair_file(
+        attributes_path,
+        attributes_identity,
+        ".gitattributes",
+    )
     if attributes is not None:
         probes = [".jojo-code-guard-probe.bat", ".jojo-code-guard-probe.cmd"]
         effective = _check_attr(repo, probes)
@@ -3489,8 +3637,13 @@ def repair_repo(repo: Path, install_hook: bool = False) -> list[str]:
                 + "*.cmd text eol=crlf"
                 + newline
             )
-            with attributes_path.open("a", encoding="utf-8", newline="") as stream:
-                stream.write(addition)
+            _append_verified_repair_file(
+                attributes_path,
+                attributes_identity,
+                attributes_data,
+                addition,
+                ".gitattributes",
+            )
             created.append(".gitattributes 批处理 CRLF 规则（未执行 renormalize，未修改脚本或暂存区）")
     if _config(repo, "--local", "core.autocrlf").lower() != "false":
         subprocess.run(["git", "config", "--local", "core.autocrlf", "false"], cwd=str(repo), check=True)

@@ -6,10 +6,10 @@ from __future__ import annotations
 import argparse
 import os
 import pathlib
-import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 
 from guard_core import find_repo
 
@@ -53,7 +53,7 @@ def _run_git(repo: pathlib.Path, arguments: list[str]) -> subprocess.CompletedPr
 
 
 def _git_path(repo: pathlib.Path, arguments: list[str], description: str) -> pathlib.Path:
-    """读取 Git 返回的路径，并按仓库根目录解析相对值。"""
+    """读取 Git 返回的路径，并按仓库根目录转为不解析链接的绝对路径。"""
     result = _run_git(repo, arguments)
     if result.returncode != 0:
         detail = result.stderr.decode("utf-8", errors="replace").strip()
@@ -62,7 +62,89 @@ def _git_path(repo: pathlib.Path, arguments: list[str], description: str) -> pat
     if not raw:
         raise RuntimeError(f"Git 返回了空的 {description}")
     path = pathlib.Path(os.fsdecode(raw))
-    return path.resolve() if path.is_absolute() else (repo / path).resolve()
+    candidate = path if path.is_absolute() else repo / path
+    return pathlib.Path(os.path.abspath(os.fspath(candidate)))
+
+
+def _path_is_link_like(path: pathlib.Path, details: os.stat_result | None = None) -> bool:
+    """识别符号链接、junction 和其他 Windows reparse point。"""
+    if path.is_symlink():
+        return True
+    if details is None:
+        try:
+            details = path.lstat()
+        except FileNotFoundError:
+            return False
+    attributes = getattr(details, "st_file_attributes", 0)
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & reparse_point)
+
+
+def _assert_safe_hooks_directory(path: pathlib.Path) -> None:
+    """拒绝通过链接型或非目录 hooks 路径写入。"""
+    try:
+        details = path.lstat()
+    except FileNotFoundError as error:
+        raise RuntimeError(f"Git hooks 目录不存在：{path}") from error
+    if _path_is_link_like(path, details):
+        raise RuntimeError(f"Git hooks 目录是符号链接、junction 或 reparse point：{path}")
+    if not stat.S_ISDIR(details.st_mode):
+        raise RuntimeError(f"Git hooks 路径不是目录：{path}")
+
+
+def _managed_file_identity(path: pathlib.Path, label: str) -> tuple[int, ...] | None:
+    """记录受管普通文件身份，并拒绝链接或多链接对象。"""
+    try:
+        details = path.lstat()
+    except FileNotFoundError:
+        return None
+    if _path_is_link_like(path, details):
+        raise RuntimeError(f"{label}是符号链接、junction 或 reparse point：{path}")
+    if not stat.S_ISREG(details.st_mode):
+        raise RuntimeError(f"{label}不是普通文件：{path}")
+    if details.st_nlink != 1:
+        raise RuntimeError(f"{label}是硬链接或多链接文件：{path}")
+    return (
+        int(details.st_dev),
+        int(details.st_ino),
+        int(stat.S_IFMT(details.st_mode)),
+        int(details.st_size),
+        int(details.st_mtime_ns),
+        int(details.st_nlink),
+    )
+
+
+def _write_managed_file(
+    path: pathlib.Path,
+    data: bytes,
+    mode: int,
+    label: str,
+    expected: tuple[int, ...] | None,
+) -> None:
+    """从独占临时文件原子发布受管文件，不跟随目标链接。"""
+    _assert_safe_hooks_directory(path.parent)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = pathlib.Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        _assert_safe_hooks_directory(path.parent)
+        if _managed_file_identity(path, label) != expected:
+            raise RuntimeError(f"{label}在发布前发生变化：{path}")
+        os.replace(temporary, path)
+        if _managed_file_identity(path, label) is None or path.read_bytes() != data:
+            raise RuntimeError(f"{label}发布后复核失败：{path}")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _effective_hooks_path_setting(repo: pathlib.Path) -> str | None:
@@ -94,8 +176,8 @@ def _effective_hooks_dir(repo: pathlib.Path) -> pathlib.Path:
         )
 
     common_dir = _git_path(repo, ["rev-parse", "--git-common-dir"], "Git common directory")
-    expected = (common_dir / "hooks").resolve()
-    if hooks_dir != expected:
+    expected = pathlib.Path(os.path.abspath(os.fspath(common_dir / "hooks")))
+    if os.path.normcase(os.fspath(hooks_dir)) != os.path.normcase(os.fspath(expected)):
         raise RuntimeError(
             f"Git 报告的 hooks 目录与默认 common-dir 语义不一致：{hooks_dir} != {expected}"
         )
@@ -106,29 +188,52 @@ def install(repo: pathlib.Path) -> pathlib.Path:
     """安装或更新自有 hook，绝不覆盖第三方 hook。"""
     hooks_dir = _effective_hooks_dir(repo)
     hooks_dir.mkdir(parents=True, exist_ok=True)
+    _assert_safe_hooks_directory(hooks_dir)
     pre_commit = hooks_dir / "pre-commit"
     source_dir = pathlib.Path(__file__).resolve().parent
     source_files = {
         "jojo_guard_core.py": source_dir / "guard_core.py",
         "jojo_hook_check.py": source_dir / "hook_check.py",
     }
-    if pre_commit.exists() or pre_commit.is_symlink():
-        if pre_commit.is_symlink():
-            raise RuntimeError(f"已有符号链接 pre-commit，未覆盖：{pre_commit}")
+    pre_commit_identity = _managed_file_identity(pre_commit, "pre-commit")
+    helper_identities = {
+        name: _managed_file_identity(hooks_dir / name, f"Hook 辅助脚本 {name}")
+        for name in source_files
+    }
+    if pre_commit_identity is not None:
         existing = pre_commit.read_bytes()
         if existing not in KNOWN_WRAPPERS:
             raise RuntimeError(f"已有第三方 pre-commit，未覆盖：{pre_commit}")
         copies_current = all(
-            (hooks_dir / name).is_file() and (hooks_dir / name).read_bytes() == source.read_bytes()
+            helper_identities[name] is not None
+            and (hooks_dir / name).read_bytes() == source.read_bytes()
             for name, source in source_files.items()
         )
         if copies_current:
             return pre_commit
 
     for name, source in source_files.items():
-        shutil.copyfile(source, hooks_dir / name)
-    pre_commit.write_bytes(WRAPPER.encode("utf-8"))
-    pre_commit.chmod(pre_commit.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        source_details = source.stat()
+        _write_managed_file(
+            hooks_dir / name,
+            source.read_bytes(),
+            stat.S_IMODE(source_details.st_mode),
+            f"Hook 辅助脚本 {name}",
+            helper_identities[name],
+        )
+    wrapper_mode = (
+        stat.S_IMODE(pre_commit.lstat().st_mode)
+        if pre_commit_identity is not None
+        else 0o755
+    )
+    wrapper_mode |= stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    _write_managed_file(
+        pre_commit,
+        WRAPPER.encode("utf-8"),
+        wrapper_mode,
+        "pre-commit",
+        pre_commit_identity,
+    )
     return pre_commit
 
 

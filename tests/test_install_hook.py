@@ -120,6 +120,70 @@ class InstallHookTests(unittest.TestCase):
             self.assertEqual(second.read_bytes(), first.read_bytes())
             self.assertEqual(stale.read_bytes(), source.read_bytes())
 
+    def test_hardlinked_managed_helper_is_never_overwritten(self) -> None:
+        """辅助脚本若与外部文件共享 inode，安装器必须拒绝刷新。"""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._init_repo(directory)
+            outside = Path(directory) / "outside.txt"
+            original = b"USER DATA\n"
+            with self._isolated_git_config(directory):
+                pre_commit = install_hook.install(repo)
+                helper = pre_commit.parent / "jojo_hook_check.py"
+                outside.write_bytes(original)
+                helper.unlink()
+                try:
+                    os.link(outside, helper)
+                except OSError as error:
+                    self.skipTest(f"当前文件系统不能创建硬链接：{error}")
+
+                with self.assertRaisesRegex(RuntimeError, "链接|link"):
+                    install_hook.install(repo)
+
+            self.assertEqual(outside.read_bytes(), original)
+
+    def test_all_managed_helpers_are_preflighted_before_refresh(self) -> None:
+        """后一个辅助脚本不安全时，前一个 stale 脚本也必须保持原样。"""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._init_repo(directory)
+            outside = Path(directory) / "outside.txt"
+            stale_data = b"stale but preserve\n"
+            outside_data = b"USER DATA\n"
+            with self._isolated_git_config(directory):
+                pre_commit = install_hook.install(repo)
+                first_helper = pre_commit.parent / "jojo_guard_core.py"
+                second_helper = pre_commit.parent / "jojo_hook_check.py"
+                first_helper.write_bytes(stale_data)
+                outside.write_bytes(outside_data)
+                second_helper.unlink()
+                try:
+                    os.link(outside, second_helper)
+                except OSError as error:
+                    self.skipTest(f"当前文件系统不能创建硬链接：{error}")
+
+                with self.assertRaisesRegex(RuntimeError, "链接|link"):
+                    install_hook.install(repo)
+
+            self.assertEqual(first_helper.read_bytes(), stale_data)
+            self.assertEqual(outside.read_bytes(), outside_data)
+
+    def test_linked_default_hooks_directory_is_rejected(self) -> None:
+        """默认 hooks 目录本身是链接时不能把安装写入外部目录。"""
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._init_repo(directory)
+            hooks_dir = repo / ".git" / "hooks"
+            outside_hooks = Path(directory) / "outside-hooks"
+            hooks_dir.rename(outside_hooks)
+            try:
+                os.symlink(outside_hooks, hooks_dir, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"当前平台不能创建目录符号链接：{error}")
+
+            with self._isolated_git_config(directory):
+                with self.assertRaisesRegex(RuntimeError, "链接|link|reparse"):
+                    install_hook.install(repo)
+
+            self.assertFalse((outside_hooks / "pre-commit").exists())
+
     def test_system_hooks_path_is_rejected(self) -> None:
         """system 作用域 hooksPath 生效时不得写入默认 .git/hooks。"""
         with tempfile.TemporaryDirectory() as directory:
