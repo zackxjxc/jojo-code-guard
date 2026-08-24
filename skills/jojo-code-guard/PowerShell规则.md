@@ -4,7 +4,8 @@
 进程、提权、重定向和跨 shell 命令时，AI 必须先读取本文档，再进行分析、编码和验证。终端外壳碰巧是
 PowerShell，或只用它执行普通的只读命令，不构成本规则的触发条件。
 
-> **适用范围**: Windows 平台 ONLY。macOS / Linux 不使用 PowerShell。
+> **适用范围**: Windows PowerShell 5.1 与跨平台 PowerShell 7。Windows 专项只在 Windows 使用；
+> 非 Windows 仅在目标明确使用 PowerShell 7 / `pwsh` 时生成 `.ps1`，否则使用对应 shell 脚本。
 > **优先版本**: PowerShell 7 (Core)。如目标机器仅安装 PS 5.1，建议提醒用户安装 PS 7：
 > ```powershell
 > winget install --id Microsoft.PowerShell --source winget
@@ -13,16 +14,17 @@ PowerShell，或只用它执行普通的只读命令，不构成本规则的触�
 > **冲突声明**: 本文档经实测验证 (Win11 + PS 5.1 / PS 7.6.3)，但不保证 100% 覆盖所有边界情况。
 > **若实际运行结果与本文档冲突，应以实测为准，并在回复中明确指出哪条规则可能错误。**
 
-注意：新建脚本的开头需要添加信息输出，显示脚本来自ai编写
+新建脚本使用与文件类型相符的头部注释元数据标明由 AI 编写；不得向成功输出流写入来源提示。`.psm1`、
+`.psd1`、结构化输出脚本和管道脚本尤其不能因来源标记改变导入结果或输出协议。
 
 ---
 
 ## 0. 前置决策树（每次生成 .ps1 前必须执行）
 
 ```
-1. 确认运行平台 → 非 Windows 则禁止生成 .ps1，改用对应 shell 脚本
-2. 确认 PS 版本   → pwsh -Command '$PSVersionTable.PSVersion.Major'
-3. 确认 PS Edition → pwsh -Command '$PSVersionTable.PSEdition'
+1. 确认运行平台 → 非 Windows 仅在目标明确使用 PowerShell 7 / pwsh 时生成 .ps1，否则改用对应 shell 脚本
+2. 选择解释器      → 优先探测 pwsh；Windows 上不存在时回退到 powershell.exe，二者都不存在则停止
+3. 确认 PS 版本/Edition → 用选中的解释器读取 $PSVersionTable.PSVersion.Major 与 $PSVersionTable.PSEdition
    - "Desktop" = PS 5.1 (Windows 内置)
    - "Core"    = PS 6+ / 7 (跨平台)
 4. 按版本查下表，跳过不适用的规则
@@ -40,26 +42,31 @@ PowerShell，或只用它执行普通的只读命令，不构成本规则的触�
 
 | 场景 | PS 5.1 (Desktop) | PS 7+ (Core) |
 |------|------------------|--------------|
-| `.ps1` 含中文 | **必须 UTF-8 with BOM** | UTF-8 无 BOM 即可 |
-| `.ps1` 纯英文 | 建议 UTF-8 with BOM | UTF-8 无 BOM 即可 |
+| 新建 `.ps1/.psm1/.psd1` 且含非 ASCII | **UTF-8 with BOM** | UTF-8 无 BOM即可 |
+| 新建 PowerShell 文件且纯 ASCII | UTF-8 无 BOM 即可 | UTF-8 无 BOM 即可 |
 | `.bat` / `.cmd` | **UTF-8 without BOM** (且 CRLF) | 同左 |
 | Unix shebang `.ps1` | 不适用 | **禁止 BOM** (内核无法解析) |
 
-- 新建 `.ps1` 默认使用 UTF-8 无 BOM + LF；明确由 Windows PowerShell 5.1 执行且含中文时使用 UTF-8 BOM。
+- 新建 `.ps1/.psm1/.psd1` 默认使用 UTF-8 无 BOM + LF；只有明确由 Windows PowerShell 5.1 解释且含非 ASCII
+  时使用 UTF-8 BOM。
 - 已有文件保持原始编码、BOM 和换行符；除非用户明确授权，不进行批量编码或换行迁移。
 - `.bat/.cmd` 必须使用 UTF-8 无 BOM + CRLF；`.gitattributes` 使用 `*.bat text eol=crlf` 和
   `*.cmd text eol=crlf` 保证 Git 检出结果。这两条规则只覆盖批处理文件的全局 `* -text`。
 - 新建 `.gitattributes` 时默认加入上述批处理规则。已有仓库补充规则时，必须说明后续 checkout、reset
   或重新暂存可能把现有脚本转换为 CRLF；不自动执行 `git add --renormalize`，不批量改写脚本，不修改暂存区。
 
-### PS 5.1 写入 .ps1 后必须补 BOM
+### 仅在 PS 5.1 新建含非 ASCII PowerShell 文件时写入 BOM
 
-```bash
-# 检查 BOM
-head -c 3 script.ps1 | xxd          # 期望: efbb bf
+```powershell
+# 新文件应在首次写入时选择正确编码，不对已有文件做事后转码。
+$path = Join-Path $PWD 'script.ps1'
+$content = "# 由 AI 编写`nWrite-Output '示例'`n"
+$utf8Bom = New-Object System.Text.UTF8Encoding($true)
+[IO.File]::WriteAllText($path, $content, $utf8Bom)
 
-# 补 BOM
-printf '\xef\xbb\xbf' | cat - script.ps1 > tmp.ps1 && mv tmp.ps1 script.ps1
+# 只读检查 BOM。
+$bytes = [IO.File]::ReadAllBytes($path)
+$hasUtf8Bom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
 ```
 
 ### PS 7 无需此操作
@@ -67,15 +74,22 @@ PS 7 默认 UTF-8，中文注释/字符串无 BOM 可正常解析。但如有 BO
 
 ---
 
-## 2. 始终显式指定编码
+## 2. 按文件基线或数据协议选择编码
 
-虽然 PS 7 默认已是 UTF-8，但为兼容 PS 5.1，**生成代码时始终显式指定**：
+不得为了“兼容”而对全部文件 I/O 无条件指定 `-Encoding UTF8`。已有文件先识别并保持原编码、BOM 和换行；
+只有输入或输出协议明确为 UTF-8 时才使用对应参数。Windows PowerShell 5.1 的 `-Encoding UTF8` 会写入
+BOM；新建 UTF-8 无 BOM 输出应显式使用 `UTF8Encoding($false)`：
 
 ```powershell
+# 仅当输入契约明确为 UTF-8。
 Get-Content -Encoding UTF8
-Set-Content -Encoding UTF8
-Out-File   -Encoding UTF8      # PS5.1 默认 UTF-16LE! PS7 默认 UTF-8
+
+# 新建且协议要求 UTF-8 无 BOM。
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[IO.File]::WriteAllText($path, $content, $utf8NoBom)
 ```
+
+已有非 UTF-8 文件不得直接套用上述示例；应按编辑前基线选择同一编码器，或在用户明确授权迁移后再转码。
 
 | Cmdlet | PS 5.1 默认 | PS 7 默认 |
 |--------|-----------|----------|
@@ -125,12 +139,18 @@ Start-Process -FilePath $exe -ArgumentList @("a b", "c", "d e")
 # 方案 1: & 运算符 (简单参数, 正确保持边界)
 & $exe "a b" "c" "d e"
 
-# 方案 2: 临时批处理文件 (需要窗口控制时)
-$batContent = "@echo off`r`n`"$exe`" $ExeArgs >`"$out`" 2>`"$err`""
-$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[IO.File]::WriteAllText($bat, $batContent, $utf8NoBom)
-Start-Process -FilePath $bat -WindowStyle Hidden -Wait -PassThru
+# 方案 2: PS 7 需要精确参数边界或进程控制时
+$startInfo = [Diagnostics.ProcessStartInfo]::new()
+$startInfo.FileName = $exe
+$startInfo.UseShellExecute = $false
+foreach ($argument in $arguments) {
+    [void]$startInfo.ArgumentList.Add($argument)
+}
+$process = [Diagnostics.Process]::Start($startInfo)
 ```
+
+`ProcessStartInfo.ArgumentList` 只在支持它的现代 .NET/PowerShell 7 路线使用。PS 5.1 若必须构造单一
+`Arguments` 字符串，应使用经过 argv 回显测试的 Windows 引号函数；不得把不可信参数拼进 `.bat/.cmd`。
 
 **此陷阱跨 PS 版本、跨平台均存在。PS 7 行为与 PS 5.1 完全一致。**
 
@@ -184,15 +204,27 @@ if ($p.ExitCode -ne 0) { ... }
 
 ### 结论
 无论 PS 5.1 还是 PS 7，只要 `UseShellExecute = false`，`-WindowStyle` 就一定不生效。
-**解决方案**: 在批处理文件内部做重定向，PS 侧只使用 `-WindowStyle`。
+需要隐藏窗口并捕获输出时，优先直接使用 `ProcessStartInfo`，不要用动态批处理拼接参数。
 
 ```powershell
-# 需要 隐藏窗口 + 捕获输出 时的正确做法:
-$batContent = "@echo off`r`n`"$exe`" $ExeArgs >`"$outFile`" 2>&1"
-$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[IO.File]::WriteAllText($batFile, $batContent, $utf8NoBom)
-Start-Process -FilePath $batFile -WindowStyle Hidden -Wait -PassThru
+# PowerShell 7：同时隐藏窗口、捕获输出并保持参数边界。
+$startInfo = [Diagnostics.ProcessStartInfo]::new()
+$startInfo.FileName = $exe
+$startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
+$startInfo.RedirectStandardOutput = $true
+$startInfo.RedirectStandardError = $true
+foreach ($argument in $arguments) { [void]$startInfo.ArgumentList.Add($argument) }
+$process = [Diagnostics.Process]::Start($startInfo)
+$stdoutTask = $process.StandardOutput.ReadToEndAsync()
+$stderrTask = $process.StandardError.ReadToEndAsync()
+$process.WaitForExit()
+$stdout = $stdoutTask.GetAwaiter().GetResult()
+$stderr = $stderrTask.GetAwaiter().GetResult()
 ```
+
+PS 5.1 没有 `ArgumentList`；只有参数固定或经过专门 argv 引号测试时才构造 `Arguments` 字符串。若参数不可信，
+应报告兼容性限制，不用批处理插值绕过。
 
 ### ⚠️ 已知文档冲突 (实测修正)
 旧版文档称 PS 7 下 `-RedirectStandardOutput + -WindowStyle` "改为直接报错"——实测 **不报错**，与 PS 5.1 同为静默忽略。
@@ -202,12 +234,12 @@ Start-Process -FilePath $batFile -WindowStyle Hidden -Wait -PassThru
 
 ## 8. Stop-Process 行为 (Windows vs Unix)
 
-| 平台 | PS 版本 | Stop-Process 调用的底层 API | 效果 |
-|------|---------|--------------------------|------|
-| Windows | 5.1 / 7 | `TerminateProcess` | 硬杀: 信号处理器不触发, atexit 不执行, 析构不调用, 缓冲区不刷新 |
-| Unix | 7 | `SIGTERM` | 可优雅退出: 信号处理器触发, atexit 执行 |
+| 平台 | PS 版本 | `Stop-Process` 调用路径 | 效果 |
+|------|---------|-------------------------|------|
+| Windows | 5.1 / 7 | `.NET Process.Kill`（最终调用 `TerminateProcess`） | 强制终止，不保证 finally、析构或缓冲区刷新 |
+| Unix | 7 | `.NET Process.Kill` | 强制终止，不保证信号处理器、atexit、finally 或缓冲区刷新 |
 
-### Windows 上的后果
+### 所有平台的后果
 - C++ 析构函数不执行
 - Python atexit / C# finally 不触发
 - stdout/stderr 缓冲区不刷新 (日志可能为空)
@@ -216,7 +248,7 @@ Start-Process -FilePath $batFile -WindowStyle Hidden -Wait -PassThru
 ### 正确做法
 ```powershell
 # 不依赖程序自动清理，脚本额外验证
-Stop-Process -Id $pid -Force
+Stop-Process -Id $targetProcessId -Force
 
 # 验证清理结果 (不要依赖日志)
 Get-NetRoute          # 确认路由已恢复
@@ -242,24 +274,22 @@ Get-NetIPAddress      # 确认 IP 已恢复
 # 不推荐
 cmd /c "C:\path with spaces\app.exe" arg1 arg2
 
-# 推荐: 直接调用 (路径无空格)
+# 推荐: 直接调用；调用运算符可正确处理含空格的可执行文件路径
 & $exe arg1 arg2
 
-# 或: 使用批处理文件 (路径含空格或参数复杂)
+# 需要更强进程控制时使用 ProcessStartInfo，并逐项添加参数
 ```
 
 **仅 Windows 适用。Unix 无 cmd.exe。**
 
 ---
 
-## 11. 临时批处理文件规范
+## 11. 临时批处理文件安全边界
 
-```powershell
-# UTF-8 无 BOM + CRLF 换行
-$batContent = "@echo off`r`n`"$exe`" $ExeArgs"
-$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[IO.File]::WriteAllText($batFile, $batContent, $utf8NoBom)
-```
+批处理只用于内容固定、参数可信且确实需要 `cmd.exe` 语义的 Windows 场景，并保持 UTF-8 无 BOM + CRLF。
+不得把可执行路径或不可信参数直接插值到批处理文本；包含 `& | < > ^ % ! "` 的值会改变 `cmd.exe` 语义。
+动态参数优先通过 `&` 或 `ProcessStartInfo.ArgumentList` 逐项传递。无法证明 PS 5.1 引号正确时停止并报告，
+不要生成看似可用但存在参数注入的包装脚本。
 
 **仅 Windows 适用。**
 
@@ -273,10 +303,11 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 - 停止时需清理整个进程树
 
 ```powershell
-# 递归终止进程树
-Get-Process -Id $p.Id -IncludeUserName | Stop-Process -Force
-# 或
-taskkill /PID $p.Id /T /F
+# 仅终止父进程，不会递归处理后代
+Stop-Process -Id $p.Id -Force
+
+# Windows 上终止整棵进程树
+& taskkill.exe /PID $p.Id /T /F
 ```
 
 **仅 Windows + cmd.exe 场景适用。**
@@ -332,7 +363,8 @@ try {
 | 变量 | PS 5.1 | PS 7 (Windows) | PS 7 (Unix) |
 |------|--------|---------------|-------------|
 | `$env:USERPROFILE` | ✅ | ✅ | ❌ |
-| `$env:HOME` | ❌ | ✅ (映射到 USERPROFILE) | ✅ |
+| 自动变量 `$HOME` | ✅ | ✅（通常为用户配置目录） | ✅ |
+| `$env:HOME` | 仅外部环境提供时存在 | 仅外部环境提供时存在 | 通常存在 |
 | `$env:TEMP` | ✅ | ✅ | ❌ |
 | `$env:TMPDIR` | ❌ | ❌ (空) | ✅ |
 
@@ -397,15 +429,15 @@ Get-Process -Name "app*"
 
 ## 18. BOM 检查规则 (按版本区分)
 
-| PS 版本 | 要求 | 验证命令 |
+| PS 版本 | 要求 | 验证方式 |
 |---------|------|---------|
-| 5.1 | **必须有 BOM** (`efbb bf`) | `head -c 3 script.ps1 \| xxd` |
-| 7 (Windows) | 无 BOM 即可 (有也不报错) | 同上 |
-| 7 (Unix) | **禁止有 BOM** (shebang 失效) | 同上 |
+| 5.1 | 已有文件保持基线；新建非 ASCII 脚本使用 BOM | `[IO.File]::ReadAllBytes()` 检查前三字节 |
+| 7 (Windows) | 新建文件默认无 BOM；已有文件保持基线 | 同左 |
+| 7 (Unix) | shebang 脚本禁止 BOM | 同左，并确认首字节为 `0x23`（`#`） |
 
 ### PS 7 下无需执行 PS 5.1 的 BOM 补全流程
-PS 7 默认 UTF-8，Write/Edit 工具写入后不需要补 BOM (Windows 上)。
-Unix 上反而要确认无 BOM (`head -c 3 script.ps1 | xxd` 首字节应是 `23` 即 `#`)。
+PS 7 默认 UTF-8，Write/Edit 工具写入后不需要补 BOM (Windows 上)。Unix shebang 脚本用 .NET 字节 API
+确认无 BOM，且首字节应是 `0x23`（`#`）；不要依赖目标机器未必安装的 `head` 或 `xxd`。
 
 ---
 
@@ -546,7 +578,7 @@ $PSNativeCommandUseErrorActionPreference = $true   # 默认 $false
 | `$PSNativeCommandUseErrorActionPreference` | 原生命令是否响应 `$ErrorActionPreference` |
 | `Foreach-Object -Parallel` | 并行处理 (PS 7.0+) |
 | `??` / `?.` 运算符 | Null 合并 / 条件访问 (PS 7.0+) |
-| 默认 UTF-8 | 所有文件操作默认 UTF-8，无需显式指定 (但仍建议保留以兼容 PS 5.1) |
+| 默认 UTF-8 | PowerShell 7 的文本 cmdlet 默认值更接近 UTF-8；仍按文件基线或数据协议选择编码 |
 
 ---
 
@@ -571,24 +603,24 @@ pwsh -File .\scripts\run-task.ps1
 
 | # | 规则 | PS5.1 Win | PS7 Win | PS7 Unix | 关键差异 |
 |----|------|:---------:|:-------:|:--------:|---------|
-| 1 | 编码 BOM | ✅ 必须有 | 无BOM即可 | ⚠️禁BOM | PS7默认UTF-8; Unix shebang禁BOM |
-| 2 | 显式编码 | ✅ 必须 | 建议保留 | 建议保留 | PS7默认已是UTF-8 |
+| 1 | 编码 BOM | 新建非ASCII脚本需要 | 无BOM即可 | ⚠️禁BOM | 已有文件始终保真; Unix shebang禁BOM |
+| 2 | 显式编码 | 按基线/协议 | 按基线/协议 | 按基线/协议 | PS5.1 的 UTF8 输出会带 BOM |
 | 3 | 禁用$Args | ✅ | ✅ | ✅ | 语言级陷阱 |
 | 4 | ArgList数组 | ✅ | ✅ | ✅ | 陷阱跨版本 |
 | 5 | 异步 | ✅ | ✅ | ✅ | 跨平台一致 |
 | 6 | LASTEXITCODE | ✅ | ✅ | ✅ | 跨平台一致 |
 | 7 | WindowStyle | ✅ | ✅ | 🔴不适用 | -RedirectStd*+WinStyle=静默忽略; -NoNew+WinStyle=报错 |
-| 8 | Stop-Process | ✅ Terminate | ✅ Terminate | ⚠️SIGTERM | Windows硬杀, Unix可优雅 |
+| 8 | Stop-Process | ✅ Process.Kill | ✅ Process.Kill | ✅ Process.Kill | 所有平台均为强制终止，不保证清理 |
 | 9 | 不依赖日志 | ✅ | ✅ | ✅ | 原则 |
 | 10 | cmd /c | ✅ | ✅ | 🔴不存在 | Unix无cmd.exe |
-| 11 | 批处理规范 | ✅ | ✅ | 🔴不存在 | 仅Windows |
+| 11 | 批处理安全边界 | ✅ | ✅ | 🔴不存在 | 不拼接不可信参数; 仅Windows |
 | 12 | 进程树 | ✅ | ✅ | 🔴不存在 | 仅Win+cmd.exe场景 |
 | 13 | 网络cmdlet | ✅ | ✅ | 🔴不存在 | Remove/New-NetAdapter不存在 |
-| 14 | env语法 | ✅ | ✅ | ⚠️变量不同 | Win有USERPROFILE/TEMP; Unix有HOME/TMPDIR; PS7 Win都有 |
+| 14 | env语法 | ✅ | ✅ | ⚠️变量不同 | `$HOME` 是自动变量；`$env:HOME` 不保证存在 |
 | 15 | Join-Path | ✅ | ✅ | ✅ | 跨平台 |
 | 16 | 禁Invoke-Expr | ✅ | ✅ | ✅ | 语言级 |
 | 17 | 对象接口 | ✅ | ✅ | ⚠️命令不同 | Win用Get-*, Unix用Unix命令 |
-| 18 | BOM检查 | ✅ 查有BOM | 查无BOM | ⚠️查无BOM | Unix确认首字符是# |
+| 18 | BOM检查 | 按基线；新建非ASCII查有BOM | 查无BOM | ⚠️查无BOM | Unix确认首字符是# |
 | 19 | 禁数组ArgList | ✅ | ✅ | ✅ | 同#4 |
 | 20 | 2>&1 ErrRec | ✅ | ✅ | ✅ | 语言级 |
 | 21 | NoNewWindow | ✅ | ✅ | 🔴不可用 | Unix不支持控制台子系统 |
@@ -604,15 +636,15 @@ pwsh -File .\scripts\run-task.ps1
 
 生成 `.ps1` 脚本后，逐项确认：
 
-- [ ] 目标平台是 Windows? (非 Windows 则不该生成 .ps1)
+- [ ] 已确认目标平台? (非 Windows 仅在目标明确使用 PowerShell 7 / pwsh 时生成 .ps1)
 - [ ] 确认了 PS 版本并选择了对应规则?
-- [ ] PS5.1: 文件有 BOM? / PS7: 无 BOM (Win) 或 确认无 BOM (Unix)?
-- [ ] 全部文件 I/O 显式指定了 `-Encoding UTF8`?
+- [ ] 已有文件保持原编码/BOM/换行；新建 PS5.1 非 ASCII 脚本才使用 BOM；Unix shebang 确认无 BOM?
+- [ ] 文件 I/O 按已知基线或数据协议选择编码，未无条件套用 `-Encoding UTF8`?
 - [ ] 没有使用 `$Args` 作为参数名?
 - [ ] 没有向 `-ArgumentList` 传入数组?
 - [ ] `Start-Process` 后正确获取退出码 (`-PassThru` + `.ExitCode`)?
 - [ ] 没有 `-WindowStyle` + `-NoNewWindow` 同时使用?
-- [ ] 需要窗口隐藏 + 重定向时使用了批处理方案?
+- [ ] 需要窗口隐藏 + 重定向时使用安全进程 API，未把不可信参数拼进批处理?
 - [ ] 路径使用 `Join-Path` 而非字符串拼接?
 - [ ] 没有使用 `Invoke-Expression`?
 - [ ] 优先使用对象接口 (Get-Net* / Get-Process)?

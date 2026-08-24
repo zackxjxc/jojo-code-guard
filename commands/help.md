@@ -2,6 +2,9 @@
 description: 显示啾啾代码守护的功能和安全边界
 ---
 
+先完整读取 `${CLAUDE_PLUGIN_ROOT}/skills/jojo-code-guard/SKILL.md`，再完整读取
+`${CLAUDE_PLUGIN_ROOT}/skills/jojo-code-guard/references/通用行为规则.md`；任一资源不可读时暂停当前任务并报告。
+
 展示 jojo-code-guard 的功能：自动保护老文件原始编码、BOM、换行和最小 diff；新增文件遵守项目标准；检查设备和仓库；按需检查未提交代码；缺失 hook 时提示安装；不创建自定义策略文件，不自动转码或格式化。`AGENTS.md` 是可选的项目规则文件，Skill 和 doctor 不会自动创建；用户需要时可自行创建并写入规则。低频历史盘点、单文件迁移和特殊换行要求直接用自然语言提出。
 
 升级 Skill：Codex 中先刷新市场快照，再重新安装插件：

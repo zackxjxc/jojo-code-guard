@@ -31,7 +31,6 @@ class PluginDoctorTests(unittest.TestCase):
 
     def _create_plugin(self, root: Path) -> None:
         """创建满足 doctor 最小资源要求的插件目录。"""
-        version = doctor._current_plugin_version() or "test"
         for relative in doctor.CLAUDE_PLUGIN_REQUIRED_FILES:
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -39,7 +38,7 @@ class PluginDoctorTests(unittest.TestCase):
                 source = doctor._hook_manifest_path(doctor._plugin_root(), "Claude")
                 path.write_bytes(source.read_bytes())
             elif relative == ".claude-plugin/plugin.json":
-                self._write_json(path, {"name": "jojo-code-guard", "version": version})
+                shutil.copyfile(doctor._plugin_root() / relative, path)
             else:
                 source = doctor._plugin_root() / relative
                 shutil.copyfile(source, path)
@@ -59,7 +58,12 @@ class PluginDoctorTests(unittest.TestCase):
         self.assertIsNotNone(source_manifest)
         manifest = dict(source_manifest or {})
         manifest["version"] = installed_version
-        self._write_json(root / ".codex-plugin" / "plugin.json", manifest)
+        manifest_path = root / ".codex-plugin" / "plugin.json"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        if installed_version == expected:
+            shutil.copyfile(doctor._plugin_root() / ".codex-plugin" / "plugin.json", manifest_path)
+        else:
+            self._write_json(manifest_path, manifest)
         source_hooks = doctor._hook_manifest_path(doctor._plugin_root(), "Codex")
         installed_hooks = doctor._hook_manifest_path(root, "Codex")
         installed_hooks.parent.mkdir(parents=True, exist_ok=True)
@@ -94,6 +98,26 @@ class PluginDoctorTests(unittest.TestCase):
             doctor._check_claude_hooks(findings)
         return findings
 
+    def _register_claude_plugin(self, home: Path, install_path: Path) -> None:
+        """把隔离插件登记为 Claude 当前启用版本。"""
+        self._write_json(
+            home / "settings.json",
+            {"enabledPlugins": {doctor.CLAUDE_PLUGIN_ID: True}},
+        )
+        self._write_json(
+            home / "plugins" / "installed_plugins.json",
+            {
+                "plugins": {
+                    doctor.CLAUDE_PLUGIN_ID: [
+                        {
+                            "installPath": str(install_path),
+                            "version": doctor._current_plugin_version() or "test",
+                        }
+                    ]
+                }
+            },
+        )
+
     def test_direct_skill_without_plugin_manifests_is_not_blocked(self) -> None:
         """直接 Skill 安装没有客户端 manifest 时只能标记版本未知，不能误报损坏。"""
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
@@ -110,12 +134,399 @@ class PluginDoctorTests(unittest.TestCase):
     def test_embedded_resource_hashes_match_release_sources(self) -> None:
         """发布资源更新时必须同步 doctor 的内置完整性清单。"""
         root = doctor._plugin_root()
+        expected = {
+            **doctor.PLUGIN_RESOURCE_SHA256,
+            **doctor.CLAUDE_PLUGIN_RESOURCE_SHA256,
+            **doctor.CODEX_PLUGIN_RESOURCE_SHA256,
+        }
         actual = {
             relative: doctor._resource_sha256(root / relative)
-            for relative in doctor.PLUGIN_RESOURCE_SHA256
+            for relative in expected
         }
 
-        self.assertEqual(actual, doctor.PLUGIN_RESOURCE_SHA256)
+        self.assertEqual(actual, expected)
+
+    def test_tampered_claude_manifest_is_blocked(self) -> None:
+        """Claude manifest 即使版本未变，改写其行为字段也必须触发阻断。"""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".claude"
+            install_path = Path(directory) / "plugin"
+            self._create_plugin(install_path)
+            manifest_path = install_path / ".claude-plugin" / "plugin.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["description"] = "tampered"
+            self._write_json(manifest_path, manifest)
+            self._register_claude_plugin(home, install_path)
+
+            findings = self._check(home)
+
+        integrity = next(item for item in findings if item.item == "Plugin resource integrity")
+        self.assertEqual(integrity.level, "BLOCKED")
+        self.assertIn(".claude-plugin/plugin.json", integrity.message)
+
+    def test_tampered_codex_manifest_is_blocked(self) -> None:
+        """Codex manifest 的技能路径被改写时必须触发完整性阻断。"""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            install_path = self._create_codex_plugin(home)
+            manifest_path = install_path / ".codex-plugin" / "plugin.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["skills"] = "../../attacker"
+            self._write_json(manifest_path, manifest)
+
+            findings = self._check_codex(home)
+
+        integrity = next(item for item in findings if item.item == "Plugin resource integrity")
+        self.assertEqual(integrity.level, "BLOCKED")
+        self.assertIn(".codex-plugin/plugin.json", integrity.message)
+
+    def test_tampered_agent_policy_is_blocked(self) -> None:
+        """公开 Skill 的 Codex 调用策略被改写时必须触发完整性阻断。"""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            install_path = self._create_codex_plugin(home)
+            relative = "skills/jojo-code-guard-doctor/agents/openai.yaml"
+            (install_path / relative).parent.mkdir(parents=True, exist_ok=True)
+            (install_path / relative).write_text("policy: malicious\n", encoding="utf-8")
+
+            findings = self._check_codex(home)
+
+        integrity = next(item for item in findings if item.item == "Plugin resource integrity")
+        self.assertEqual(integrity.level, "BLOCKED")
+        self.assertIn(relative, integrity.message)
+
+    def test_missing_runtime_entrypoint_is_blocked(self) -> None:
+        """doctor 不能把缺少脚本、公开 Skill 或 Claude command 的安装判为健康。"""
+        relative_paths = (
+            "skills/jojo-code-guard/scripts/doctor.py",
+            "skills/jojo-code-guard-doctor/SKILL.md",
+            "skills/jojo-code-guard-check-diff/SKILL.md",
+            "skills/jojo-code-guard-help/SKILL.md",
+            "commands/doctor.md",
+            "commands/check-diff.md",
+            "commands/help.md",
+        )
+        for relative in relative_paths:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory) / ".claude"
+                install_path = Path(directory) / "plugin"
+                self._create_plugin(install_path)
+                target = install_path / relative
+                if not target.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(doctor._plugin_root() / relative, target)
+                target.unlink()
+                self._register_claude_plugin(home, install_path)
+
+                findings = self._check(home)
+
+                resources = next(item for item in findings if item.item == "Plugin resources")
+                self.assertEqual(resources.level, "BLOCKED")
+                self.assertIn(relative, resources.message)
+
+    def test_tampered_claude_command_resource_is_blocked(self) -> None:
+        """公开 Claude command 被改写时必须触发完整性阻断。"""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".claude"
+            install_path = Path(directory) / "plugin"
+            self._create_plugin(install_path)
+            command_path = install_path / "commands" / "doctor.md"
+            if not command_path.exists():
+                command_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(doctor._plugin_root() / "commands" / "doctor.md", command_path)
+            command_path.write_text("malicious override\n", encoding="utf-8")
+            self._register_claude_plugin(home, install_path)
+
+            findings = self._check(home)
+
+        integrity = next(item for item in findings if item.item == "Plugin resource integrity")
+        self.assertEqual(integrity.level, "BLOCKED")
+        self.assertIn("commands/doctor.md", integrity.message)
+
+    def test_added_claude_public_entrypoint_is_blocked(self) -> None:
+        """Claude 安装不能在夹带自动发现的未知入口时报告完整性健康。"""
+        relative_paths = (
+            "commands/unexpected.md",
+            "commands/nested/unexpected.md",
+            "skills/unexpected-entry/SKILL.md",
+            "skills/category/unexpected-entry/SKILL.md",
+            "skills/unexpected-entry/skill.md",
+            "SKILL.md",
+            "agents/unexpected.md",
+            ".mcp.json",
+            ".lsp.json",
+            "monitors/monitors.json",
+            "bin/unexpected-tool",
+            "settings.json",
+            "workflows/unexpected.js",
+            "output-styles/unexpected.md",
+            "themes/unexpected.json",
+        )
+        for relative in relative_paths:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory) / ".claude"
+                install_path = Path(directory) / "plugin"
+                self._create_plugin(install_path)
+                unexpected = install_path / relative
+                unexpected.parent.mkdir(parents=True, exist_ok=True)
+                unexpected.write_text("unexpected entry\n", encoding="utf-8")
+                self._register_claude_plugin(home, install_path)
+
+                findings = self._check(home)
+
+                integrity = next(
+                    item for item in findings if item.item == "Plugin resource integrity"
+                )
+                self.assertEqual(integrity.level, "BLOCKED")
+                self.assertIn(relative, integrity.message)
+
+    def test_symlinked_claude_discovery_root_is_blocked(self) -> None:
+        """Claude 自动发现根和未知 Skill 符号链接不能绕过 doctor 枚举。"""
+        relative_paths = (
+            Path("commands"),
+            Path("commands/nested-link"),
+            Path("skills"),
+            Path("agents"),
+            Path("agents/nested-link"),
+            Path("skills/unexpected-link"),
+        )
+        original_is_symlink = Path.is_symlink
+        for relative in relative_paths:
+            with self.subTest(relative=str(relative)), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory) / ".claude"
+                install_path = Path(directory) / "plugin"
+                self._create_plugin(install_path)
+                target = install_path / relative
+                if not target.exists():
+                    target.mkdir(parents=True)
+                self._register_claude_plugin(home, install_path)
+
+                def is_symlink(path: Path, target: Path = target) -> bool:
+                    return path == target or original_is_symlink(path)
+
+                with mock.patch.object(Path, "is_symlink", autospec=True, side_effect=is_symlink):
+                    findings = self._check(home)
+
+                integrity = next(
+                    item for item in findings if item.item == "Plugin resource integrity"
+                )
+                self.assertEqual(integrity.level, "BLOCKED")
+                self.assertIn(relative.as_posix(), integrity.message)
+
+    def test_tampered_shared_subskill_is_blocked_for_codex(self) -> None:
+        """Codex 安装中的共享公开 Skill 被改写时必须触发完整性阻断。"""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            install_path = self._create_codex_plugin(home)
+            relative = "skills/jojo-code-guard-help/SKILL.md"
+            (install_path / relative).write_text("malicious override\n", encoding="utf-8")
+
+            findings = self._check_codex(home)
+
+        integrity = next(item for item in findings if item.item == "Plugin resource integrity")
+        self.assertEqual(integrity.level, "BLOCKED")
+        self.assertIn(relative, integrity.message)
+
+    def test_added_codex_public_skill_is_blocked(self) -> None:
+        """Codex 安装不能在夹带未知公共 Skill 时报告完整性健康。"""
+        relative_paths = (
+            "skills/unexpected-entry/SKILL.md",
+            "skills/category/unexpected-entry/SKILL.md",
+            "skills/unexpected-entry/skill.md",
+        )
+        for relative in relative_paths:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory) / ".codex"
+                install_path = self._create_codex_plugin(home)
+                unexpected = install_path / relative
+                unexpected.parent.mkdir(parents=True)
+                unexpected.write_text("unexpected entry\n", encoding="utf-8")
+
+                findings = self._check_codex(home)
+
+                integrity = next(
+                    item for item in findings if item.item == "Plugin resource integrity"
+                )
+                self.assertEqual(integrity.level, "BLOCKED")
+                self.assertIn(relative, integrity.message)
+
+    def test_added_codex_default_component_file_is_blocked(self) -> None:
+        """Codex 默认发现的 MCP/app 配置不能绕过 doctor 的公开入口 allowlist。"""
+        for relative in (".mcp.json", ".app.json"):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory) / ".codex"
+                install_path = self._create_codex_plugin(home)
+                self._write_json(install_path / relative, {})
+
+                findings = self._check_codex(home)
+
+                integrity = next(
+                    item for item in findings if item.item == "Plugin resource integrity"
+                )
+                self.assertEqual(integrity.level, "BLOCKED")
+                self.assertIn(relative, integrity.message)
+
+    def test_symlinked_codex_unknown_skill_is_blocked(self) -> None:
+        """Codex 未知顶层 Skill 符号链接不能绕过 doctor 枚举。"""
+        relative_paths = (Path("skills"), Path("skills/unexpected-link"))
+        original_is_symlink = Path.is_symlink
+        for relative in relative_paths:
+            with self.subTest(relative=str(relative)), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory) / ".codex"
+                install_path = self._create_codex_plugin(home)
+                target = install_path / relative
+                if relative == Path("skills/unexpected-link"):
+                    target.mkdir()
+
+                def is_symlink(path: Path, target: Path = target) -> bool:
+                    return path == target or original_is_symlink(path)
+
+                with mock.patch.object(Path, "is_symlink", autospec=True, side_effect=is_symlink):
+                    findings = self._check_codex(home)
+
+                integrity = next(
+                    item for item in findings if item.item == "Plugin resource integrity"
+                )
+                self.assertEqual(integrity.level, "BLOCKED")
+                self.assertIn(relative.as_posix(), integrity.message)
+
+    def test_missing_shared_runtime_entrypoint_is_blocked_for_codex(self) -> None:
+        """Codex doctor 不能把缺少脚本或公开 Skill 的安装判为健康。"""
+        relative_paths = (
+            "skills/jojo-code-guard/scripts/doctor.py",
+            "skills/jojo-code-guard-doctor/SKILL.md",
+            "skills/jojo-code-guard-check-diff/SKILL.md",
+            "skills/jojo-code-guard-help/SKILL.md",
+        )
+        for relative in relative_paths:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory) / ".codex"
+                install_path = self._create_codex_plugin(home)
+                (install_path / relative).unlink()
+
+                findings = self._check_codex(home)
+
+                resources = next(item for item in findings if item.item == "Plugin resources")
+                self.assertEqual(resources.level, "BLOCKED")
+                self.assertIn(relative, resources.message)
+
+    def test_doctor_entrypoint_symlink_is_blocked(self) -> None:
+        """未静态自哈希的 doctor 入口也不能借符号链接越出安装目录。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / ".claude"
+            install_path = root / "plugin"
+            self._create_plugin(install_path)
+            target = install_path / "skills" / "jojo-code-guard" / "scripts" / "doctor.py"
+            outside = root / "outside-doctor.py"
+            outside.write_text("print('outside')\n", encoding="utf-8")
+            target.unlink()
+            try:
+                target.symlink_to(outside)
+            except OSError as error:
+                self.skipTest(f"当前平台不能创建文件符号链接：{error}")
+            self._register_claude_plugin(home, install_path)
+
+            findings = self._check(home)
+
+        integrity = next(item for item in findings if item.item == "Plugin resource integrity")
+        self.assertEqual(integrity.level, "BLOCKED")
+        self.assertIn("skills/jojo-code-guard/scripts/doctor.py", integrity.message)
+
+    def test_required_plugin_resource_hard_link_is_blocked(self) -> None:
+        """受管资源即使摘要正确，也不能通过外部硬链接在检查后被联动改写。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / ".claude"
+            install_path = root / "plugin"
+            self._create_plugin(install_path)
+            target = install_path / "hooks" / "session-start"
+            outside = root / "outside-session-start"
+            outside.write_bytes(target.read_bytes())
+            target.unlink()
+            try:
+                os.link(outside, target)
+            except OSError as error:
+                self.skipTest(f"当前文件系统不能创建硬链接：{error}")
+            self._register_claude_plugin(home, install_path)
+
+            findings = self._check(home)
+
+        integrity = next(item for item in findings if item.item == "Plugin resource integrity")
+        self.assertEqual(integrity.level, "BLOCKED")
+        self.assertIn("hooks/session-start", integrity.message)
+
+    def test_link_like_plugin_root_is_blocked_before_resource_validation(self) -> None:
+        """插件安装根自身是 symlink/junction/reparse point 时不得作为信任根。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin"
+            self._create_plugin(root)
+            findings: list[doctor.Finding] = []
+            real_link_check = doctor._plugin_path_is_link_like
+
+            def link_like(path: Path) -> bool:
+                return path == root or real_link_check(path)
+
+            with mock.patch.object(doctor, "_plugin_path_is_link_like", side_effect=link_like):
+                result = doctor._check_plugin_resource_integrity(
+                    findings,
+                    "Claude",
+                    root,
+                )
+
+        self.assertFalse(result)
+        integrity = next(item for item in findings if item.item == "Plugin resource integrity")
+        self.assertEqual(integrity.level, "BLOCKED")
+        self.assertRegex(integrity.message, "链接|reparse")
+
+    def test_claude_link_like_install_root_is_blocked_before_manifest_read(self) -> None:
+        """Claude 登记根为链接型路径时，caller 不能先读取其 manifest 或 hooks。"""
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home = base / ".claude"
+            install_path = base / "plugin"
+            self._create_plugin(install_path)
+            self._register_claude_plugin(home, install_path)
+            real_link_check = doctor._plugin_path_is_link_like
+
+            def link_like(path: Path) -> bool:
+                return path == install_path or real_link_check(path)
+
+            with mock.patch.object(
+                doctor,
+                "_plugin_path_is_link_like",
+                side_effect=link_like,
+            ), mock.patch.object(doctor, "_check_installed_plugin_version") as version_check, mock.patch.object(
+                doctor,
+                "_check_hook_manifest_freshness",
+            ) as hook_check:
+                findings = self._check(home)
+
+        version_check.assert_not_called()
+        hook_check.assert_not_called()
+        integrity = next(item for item in findings if item.item == "Plugin resource integrity")
+        self.assertEqual(integrity.level, "BLOCKED")
+
+    def test_codex_link_like_cache_version_is_blocked_before_manifest_read(self) -> None:
+        """Codex 缓存版本根为链接型路径时，caller 不能先读取 manifest。"""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            install_path = self._create_codex_plugin(home)
+            real_link_check = doctor._plugin_path_is_link_like
+
+            def link_like(path: Path) -> bool:
+                return path == install_path or real_link_check(path)
+
+            with mock.patch.object(
+                doctor,
+                "_plugin_path_is_link_like",
+                side_effect=link_like,
+            ), mock.patch.object(doctor, "_manifest_version") as manifest_version:
+                findings = self._check_codex(home)
+
+        manifest_version.assert_not_called()
+        integrity = next(item for item in findings if item.item == "Plugin resource integrity")
+        self.assertEqual(integrity.level, "BLOCKED")
 
     def test_tampered_hook_resource_is_blocked(self) -> None:
         """版本和 Hook manifest 相同也不能掩盖被篡改的可执行入口。"""
@@ -462,6 +873,52 @@ class PluginDoctorTests(unittest.TestCase):
         self.assertTrue(any(item.item == "Plugin cache" and item.level == "WARNING" for item in findings))
         self.assertFalse(any(item.item == "Plugin version" and item.level == "OK" for item in findings))
 
+    def test_every_codex_cache_directory_must_match_its_manifest_version(self) -> None:
+        """多缓存时也必须逐个核对版本目录名，不能只检查资源摘要。"""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            first = self._create_codex_plugin(home)
+            second = self._create_codex_plugin(home, version="0.0.1")
+            first.rename(first.with_name("bogus-a"))
+            second.rename(second.with_name("bogus-b"))
+            (home / "config.toml").write_text(
+                f'[plugins."{doctor.CODEX_PLUGIN_ID}"]\nenabled = true\n',
+                encoding="utf-8",
+            )
+
+            findings = self._check_codex(home)
+
+        mismatches = [
+            item
+            for item in findings
+            if item.item == "Plugin version" and item.level == "BLOCKED"
+        ]
+        self.assertEqual(len(mismatches), 2)
+        self.assertTrue(all("缓存目录" in item.message for item in mismatches))
+
+    def test_every_codex_cache_is_checked_for_unknown_entrypoints(self) -> None:
+        """无法确定加载版本时，也不能跳过任一候选缓存的 MCP/app/Skill 完整性检查。"""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            self._create_codex_plugin(home)
+            stale = self._create_codex_plugin(home, version="0.0.1")
+            (stale / ".mcp.json").write_text("{}\n", encoding="utf-8")
+            (home / "config.toml").write_text(
+                f'[plugins."{doctor.CODEX_PLUGIN_ID}"]\nenabled = true\n',
+                encoding="utf-8",
+            )
+
+            findings = self._check_codex(home)
+
+        self.assertTrue(
+            any(
+                item.item == "Plugin resource integrity"
+                and item.level == "BLOCKED"
+                and ".mcp.json" in item.message
+                for item in findings
+            )
+        )
+
     def test_codex_doctor_never_calls_plugin_list(self) -> None:
         """只读 doctor 不得调用会刷新 marketplace snapshot 的 plugin list。"""
         with tempfile.TemporaryDirectory() as directory:
@@ -785,35 +1242,46 @@ class RepositorySettingsTests(unittest.TestCase):
         self.assertEqual(result.level, "BLOCKED")
         self.assertIn("git status 执行失败", result.message)
 
-    def test_elevated_install_quotes_path_waits_and_uses_ps51_bom(self) -> None:
-        """UAC 启动必须正确引用空格路径、等待子进程，并兼容 PowerShell 5.1。"""
-        with tempfile.TemporaryDirectory(prefix="jojo audit ") as directory:
-            script_path = Path(directory) / "probe script.ps1"
-            descriptor = os.open(script_path, os.O_CREAT | os.O_RDWR)
-            captured: list[list[str]] = []
+    def test_install_tools_does_not_create_a_doctor_owned_elevated_payload(self) -> None:
+        """doctor 不得把 PATH 或临时目录中的可变载荷带入管理员令牌。"""
+        winget = str((ROOT / "test-fixtures" / "winget.exe").resolve())
+        available = {
+            "winget": winget,
+            "pwsh": None,
+            "gsudo": "C:/Tools/gsudo.exe",
+            "rg": "C:/Tools/rg.exe",
+        }
+        commands: list[list[str]] = []
 
-            def run(command: list[str], cwd: Path | None = None) -> tuple[int, str]:
-                del cwd
-                captured.append(command)
-                return 0, ""
+        def run(command: list[str], cwd: Path | None = None) -> tuple[int, str]:
+            del cwd
+            commands.append(command)
+            return 0, "ok"
 
-            with mock.patch.object(doctor.shutil, "which", side_effect=lambda name: "powershell.exe" if name == "powershell" else None), mock.patch.object(
-                doctor.tempfile, "mkstemp", return_value=(descriptor, str(script_path))
-            ), mock.patch.object(doctor, "_run", side_effect=run):
-                succeeded, _message = doctor._run_elevated_install([["winget", "install", "example"]])
+        findings: list[doctor.Finding] = []
+        with mock.patch.object(doctor.platform, "system", return_value="Windows"), mock.patch.object(
+            doctor.shutil, "which", side_effect=lambda name: available.get(name)
+        ), mock.patch.object(doctor, "_is_windows_admin", return_value=False, create=True), mock.patch.object(
+            doctor, "_run", side_effect=run
+        ), mock.patch.object(
+            doctor,
+            "_run_elevated_install",
+            return_value=(False, "unexpected self-elevation"),
+            create=True,
+        ) as elevated:
+            doctor._install_tools(findings)
 
-            data = script_path.read_bytes()
-
-        self.assertTrue(succeeded)
-        self.assertTrue(data.startswith(b"\xef\xbb\xbf"))
-        outer = captured[0][-1]
-        self.assertIn("-Wait -PassThru", outer)
-        self.assertIn(f'-File "{script_path}"', outer)
+        elevated.assert_not_called()
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0][0], winget)
+        self.assertTrue(Path(commands[0][0]).is_absolute())
+        self.assertFalse(any(item.item == "UAC" for item in findings))
 
     def test_install_tools_only_installs_missing_tools(self) -> None:
         """--install-tools 不得把补齐缺失工具扩大为升级所有已安装工具。"""
+        winget = str((ROOT / "test-fixtures" / "winget.exe").resolve())
         available = {
-            "winget": "winget.exe",
+            "winget": winget,
             "pwsh": "pwsh.exe",
             "gsudo": None,
             "rg": "rg.exe",
@@ -828,13 +1296,11 @@ class RepositorySettingsTests(unittest.TestCase):
         findings: list[doctor.Finding] = []
         with mock.patch.object(doctor.platform, "system", return_value="Windows"), mock.patch.object(
             doctor.shutil, "which", side_effect=lambda name: available.get(name)
-        ), mock.patch.object(doctor, "_is_windows_admin", return_value=True), mock.patch.object(
-            doctor, "_run", side_effect=run
-        ):
+        ), mock.patch.object(doctor, "_run", side_effect=run):
             doctor._install_tools(findings)
 
         self.assertEqual(len(commands), 1)
-        self.assertEqual(commands[0][0:2], ["winget", "install"])
+        self.assertEqual(commands[0][0:2], [winget, "install"])
         self.assertIn("gerardog.gsudo", commands[0])
         self.assertFalse(any("upgrade" in command for command in commands))
 
