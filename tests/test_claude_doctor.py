@@ -1200,6 +1200,48 @@ class RepositorySettingsTests(unittest.TestCase):
             self.assertEqual(after_index, before_index)
             self.assertTrue(any("未执行 renormalize" in item for item in changed))
 
+    def test_repair_rejects_hardlinked_attributes_before_any_write(self) -> None:
+        """仓库规则文件与外部文件共享 inode 时，repair 必须在写入前失败。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            repo.mkdir()
+            self._init_repo(repo)
+            outside = root / "outside-attributes"
+            original = b"# outside\n* -text\n"
+            outside.write_bytes(original)
+            try:
+                os.link(outside, repo / ".gitattributes")
+            except OSError as error:
+                self.skipTest(f"当前文件系统不能创建硬链接：{error}")
+
+            with self.assertRaisesRegex(RuntimeError, "链接|link"):
+                doctor.repair_repo(repo)
+
+            self.assertEqual(outside.read_bytes(), original)
+            self.assertFalse((repo / ".editorconfig").exists())
+            self.assertFalse((repo / ".gitignore").exists())
+
+    def test_repair_rejects_broken_template_symlink_before_any_write(self) -> None:
+        """broken symlink 不能被当作缺失模板并在仓库外创建目标。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            repo.mkdir()
+            self._init_repo(repo)
+            outside = root / "outside-editorconfig"
+            try:
+                os.symlink(outside, repo / ".editorconfig")
+            except OSError as error:
+                self.skipTest(f"当前平台不能创建文件符号链接：{error}")
+
+            with self.assertRaisesRegex(RuntimeError, "链接|link|reparse"):
+                doctor.repair_repo(repo)
+
+            self.assertFalse(outside.exists())
+            self.assertFalse((repo / ".gitattributes").exists())
+            self.assertFalse((repo / ".gitignore").exists())
+
     def test_repair_preview_shows_migration_risk(self) -> None:
         """修复前应展示拟议属性差异和迁移风险所需规则。"""
         with tempfile.TemporaryDirectory() as directory:
