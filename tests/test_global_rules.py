@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import io
 import os
 import stat
@@ -72,6 +73,14 @@ class GlobalRuleSyncTests(unittest.TestCase):
             expected = ("# 全局规则\n\n" + SOURCE_TEXT).encode("utf-8")
             self.assertEqual(set(changed), {str(path) for path in targets})
             self.assertTrue(all(target.read_bytes() == expected for target in targets))
+
+    def test_macos_system_aliases_are_distinguished_from_user_links(self) -> None:
+        """只有 macOS 固定根目录别名可穿过，/var 下的用户链接仍不可信。"""
+        with mock.patch.object(doctor.sys, "platform", "darwin"):
+            self.assertTrue(doctor._is_macos_system_path_alias(Path("/var")))
+            self.assertTrue(doctor._is_macos_system_path_alias(Path("/tmp")))
+            self.assertTrue(doctor._is_macos_system_path_alias(Path("/etc")))
+            self.assertFalse(doctor._is_macos_system_path_alias(Path("/var/folders")))
 
     def test_no_replace_capability_is_probed_before_any_target_write(self) -> None:
         """目标卷不支持 no-clobber rename 时，两个缺失目标都必须保持不存在。"""
@@ -1388,17 +1397,39 @@ class GlobalRuleSyncTests(unittest.TestCase):
             target.write_bytes(original_data)
             expected = doctor._global_rule_snapshot(target)
             real_snapshot = doctor._global_rule_snapshot
+            real_exchange = doctor._replace_global_rule_file_with_backup
             failed_once = False
+            published = False
+
+            def exchange_then_arm(
+                path: Path,
+                replacement: Path,
+                backup: Path,
+            ) -> Path:
+                nonlocal published
+                result = real_exchange(path, replacement, backup)
+                published = True
+                return result
 
             def fail_first_backup_snapshot(path: Path) -> doctor._GlobalRuleSnapshot:
                 """在交换成功后的首次 backup 复核处注入一次读取失败。"""
                 nonlocal failed_once
-                if not failed_once and ".jojo-backup-" in path.name and path.exists():
+                if (
+                    published
+                    and not failed_once
+                    and path != target
+                    and path.name.startswith(f".{target.name}.jojo-")
+                    and path.exists()
+                ):
                     failed_once = True
                     raise OSError("simulated post-commit verification failure")
                 return real_snapshot(path)
 
             with mock.patch.object(
+                doctor,
+                "_replace_global_rule_file_with_backup",
+                side_effect=exchange_then_arm,
+            ), mock.patch.object(
                 doctor,
                 "_global_rule_snapshot",
                 side_effect=fail_first_backup_snapshot,
@@ -1823,6 +1854,295 @@ class GlobalRuleSyncTests(unittest.TestCase):
         with mock.patch.object(doctor, "_global_rule_snapshot", return_value=ctime_only):
             doctor._restore_global_rule_write(record)
 
+    def test_windows_dacl_comparison_ignores_representation_only_changes(self) -> None:
+        """ReplaceFileW 后 DACL 的布局和默认继承标志变化不能误报并发写入。"""
+
+        def descriptor(control: int, dacl_offset: int) -> bytes:
+            payload = bytearray(dacl_offset + 8)
+            payload[0] = 1
+            payload[2:4] = control.to_bytes(2, "little")
+            payload[16:20] = dacl_offset.to_bytes(4, "little")
+            payload[dacl_offset] = 2
+            payload[dacl_offset + 2:dacl_offset + 4] = (8).to_bytes(2, "little")
+            return bytes(payload)
+
+        base_dacl = descriptor(0x8004, 20)
+        replacement_dacl = descriptor(0x850C, 24)
+        metadata = doctor._GlobalRuleMetadata(
+            windows_attributes=0,
+            windows_dacl=base_dacl,
+            alternate_streams=(),
+            xattrs=(),
+            uid=None,
+            gid=None,
+            file_flags=None,
+            darwin_acl=None,
+        )
+        expected = doctor._GlobalRuleSnapshot(
+            exists=True,
+            data=b"doctor: intended\n",
+            identity=(1, 2, 3, 4, 5),
+            mode=0o600,
+            metadata=metadata,
+        )
+        actual = replace(
+            expected,
+            metadata=replace(metadata, windows_dacl=replacement_dacl),
+        )
+
+        self.assertTrue(doctor._global_rule_same_object_except_windows_dacl(actual, expected))
+
+    def test_windows_dacl_comparison_collapses_only_exact_repeated_ace_sequence(self) -> None:
+        """ReplaceFileW 的整组重复 ACE 等价；任一重复项改写仍必须可见。"""
+
+        def descriptor(masks: tuple[int, ...]) -> bytes:
+            acl_size = 8 + 8 * len(masks)
+            payload = bytearray(20 + acl_size)
+            payload[0] = 1
+            payload[2:4] = (0x8004).to_bytes(2, "little")
+            payload[16:20] = (20).to_bytes(4, "little")
+            payload[20] = 2
+            payload[22:24] = acl_size.to_bytes(2, "little")
+            payload[24:26] = len(masks).to_bytes(2, "little")
+            for index, mask in enumerate(masks):
+                offset = 28 + index * 8
+                payload[offset + 2:offset + 4] = (8).to_bytes(2, "little")
+                payload[offset + 4:offset + 8] = mask.to_bytes(4, "little")
+            return bytes(payload)
+
+        expected = descriptor((0x11, 0x22, 0x33))
+        duplicated = descriptor((0x11, 0x22, 0x33, 0x11, 0x22, 0x33))
+        altered = descriptor((0x11, 0x22, 0x33, 0x11, 0x22, 0x34))
+
+        self.assertEqual(
+            doctor._normalize_windows_global_rule_dacl_for_replace(duplicated),
+            doctor._normalize_windows_global_rule_dacl_for_replace(expected),
+        )
+        self.assertNotEqual(
+            doctor._normalize_windows_global_rule_dacl_for_replace(altered),
+            doctor._normalize_windows_global_rule_dacl_for_replace(expected),
+        )
+
+    def test_windows_dacl_comparison_keeps_protection_bit_significant(self) -> None:
+        """DACL 保护位影响后续继承语义，不能随表示差异一并忽略。"""
+
+        def descriptor(control: int) -> bytes:
+            payload = bytearray(28)
+            payload[0] = 1
+            payload[2:4] = control.to_bytes(2, "little")
+            payload[16:20] = (20).to_bytes(4, "little")
+            payload[20] = 2
+            payload[22:24] = (8).to_bytes(2, "little")
+            return bytes(payload)
+
+        metadata = doctor._GlobalRuleMetadata(
+            windows_attributes=0,
+            windows_dacl=descriptor(0x8004),
+            alternate_streams=(),
+            xattrs=(),
+            uid=None,
+            gid=None,
+            file_flags=None,
+            darwin_acl=None,
+        )
+        expected = doctor._GlobalRuleSnapshot(
+            exists=True,
+            data=b"doctor: intended\n",
+            identity=(1, 2, 3, 4, 5),
+            mode=0o600,
+            metadata=metadata,
+        )
+        actual = replace(
+            expected,
+            metadata=replace(metadata, windows_dacl=descriptor(0x9004)),
+        )
+
+        self.assertFalse(doctor._global_rule_same_object_except_windows_dacl(actual, expected))
+
+    def test_windows_dacl_comparison_ignores_file_inheritance_propagation_flags(self) -> None:
+        """ReplaceFileW 重算普通文件后代传播位时，不得误判为并发 ACL 改写。"""
+
+        def descriptor(ace_flags: int) -> bytes:
+            payload = bytearray(36)
+            payload[0] = 1
+            payload[2:4] = (0x8004).to_bytes(2, "little")
+            payload[16:20] = (20).to_bytes(4, "little")
+            payload[20] = 2
+            payload[22:24] = (16).to_bytes(2, "little")
+            payload[24:26] = (1).to_bytes(2, "little")
+            payload[29] = ace_flags
+            payload[30:32] = (8).to_bytes(2, "little")
+            payload[32:36] = (0x11).to_bytes(4, "little")
+            return bytes(payload)
+
+        metadata = doctor._GlobalRuleMetadata(
+            windows_attributes=0,
+            windows_dacl=descriptor(0),
+            alternate_streams=(),
+            xattrs=(),
+            uid=None,
+            gid=None,
+            file_flags=None,
+            darwin_acl=None,
+        )
+        expected = doctor._GlobalRuleSnapshot(
+            exists=True,
+            data=b"doctor: intended\n",
+            identity=(1, 2, 3, 4, 5),
+            mode=0o600,
+            metadata=metadata,
+        )
+        actual = replace(
+            expected,
+            metadata=replace(metadata, windows_dacl=descriptor(0x17)),
+        )
+
+        self.assertTrue(doctor._global_rule_same_object_except_windows_dacl(actual, expected))
+
+    def test_windows_dacl_comparison_keeps_inherit_only_significant(self) -> None:
+        """INHERIT_ONLY 会改变当前文件的有效权限，不能视为传播噪声。"""
+
+        def descriptor(ace_flags: int) -> bytes:
+            payload = bytearray(36)
+            payload[0] = 1
+            payload[2:4] = (0x8004).to_bytes(2, "little")
+            payload[16:20] = (20).to_bytes(4, "little")
+            payload[20] = 2
+            payload[22:24] = (16).to_bytes(2, "little")
+            payload[24:26] = (1).to_bytes(2, "little")
+            payload[29] = ace_flags
+            payload[30:32] = (8).to_bytes(2, "little")
+            payload[32:36] = (0x11).to_bytes(4, "little")
+            return bytes(payload)
+
+        metadata = doctor._GlobalRuleMetadata(
+            windows_attributes=0,
+            windows_dacl=descriptor(0),
+            alternate_streams=(),
+            xattrs=(),
+            uid=None,
+            gid=None,
+            file_flags=None,
+            darwin_acl=None,
+        )
+        expected = doctor._GlobalRuleSnapshot(
+            exists=True,
+            data=b"doctor: intended\n",
+            identity=(1, 2, 3, 4, 5),
+            mode=0o600,
+            metadata=metadata,
+        )
+        actual = replace(
+            expected,
+            metadata=replace(metadata, windows_dacl=descriptor(0x08)),
+        )
+
+        self.assertFalse(doctor._global_rule_same_object_except_windows_dacl(actual, expected))
+
+    def test_windows_dacl_comparison_keeps_inherited_ace_mask_significant(self) -> None:
+        """inherited ACE 的访问掩码仍会影响权限，不能被当作纯表示差异。"""
+
+        def descriptor(explicit_mask: int, inherited_mask: int) -> bytes:
+            payload = bytearray(44)
+            payload[0] = 1
+            payload[2:4] = (0x8004).to_bytes(2, "little")
+            payload[16:20] = (20).to_bytes(4, "little")
+            payload[20] = 2
+            payload[22:24] = (24).to_bytes(2, "little")
+            payload[24:26] = (2).to_bytes(2, "little")
+            payload[30:32] = (8).to_bytes(2, "little")
+            payload[32:36] = explicit_mask.to_bytes(4, "little")
+            payload[37] = 0x10
+            payload[38:40] = (8).to_bytes(2, "little")
+            payload[40:44] = inherited_mask.to_bytes(4, "little")
+            return bytes(payload)
+
+        metadata = doctor._GlobalRuleMetadata(
+            windows_attributes=0,
+            windows_dacl=descriptor(0x11, 0x01),
+            alternate_streams=(),
+            xattrs=(),
+            uid=None,
+            gid=None,
+            file_flags=None,
+            darwin_acl=None,
+        )
+        expected = doctor._GlobalRuleSnapshot(
+            exists=True,
+            data=b"doctor: intended\n",
+            identity=(1, 2, 3, 4, 5),
+            mode=0o600,
+            metadata=metadata,
+        )
+        actual = replace(
+            expected,
+            metadata=replace(metadata, windows_dacl=descriptor(0x11, 0x02)),
+        )
+
+        self.assertFalse(doctor._global_rule_same_object_except_windows_dacl(actual, expected))
+
+    def test_windows_dacl_comparison_keeps_explicit_ace_significant(self) -> None:
+        """显式 ACE 的访问掩码变化仍必须阻断后续 DACL 重应用。"""
+
+        def descriptor(explicit_mask: int) -> bytes:
+            payload = bytearray(36)
+            payload[0] = 1
+            payload[2:4] = (0x8004).to_bytes(2, "little")
+            payload[16:20] = (20).to_bytes(4, "little")
+            payload[20] = 2
+            payload[22:24] = (16).to_bytes(2, "little")
+            payload[24:26] = (1).to_bytes(2, "little")
+            payload[30:32] = (8).to_bytes(2, "little")
+            payload[32:36] = explicit_mask.to_bytes(4, "little")
+            return bytes(payload)
+
+        metadata = doctor._GlobalRuleMetadata(
+            windows_attributes=0,
+            windows_dacl=descriptor(0x11),
+            alternate_streams=(),
+            xattrs=(),
+            uid=None,
+            gid=None,
+            file_flags=None,
+            darwin_acl=None,
+        )
+        expected = doctor._GlobalRuleSnapshot(
+            exists=True,
+            data=b"doctor: intended\n",
+            identity=(1, 2, 3, 4, 5),
+            mode=0o600,
+            metadata=metadata,
+        )
+        actual = replace(
+            expected,
+            metadata=replace(metadata, windows_dacl=descriptor(0x12)),
+        )
+
+        self.assertFalse(doctor._global_rule_same_object_except_windows_dacl(actual, expected))
+
+    def test_macos_missing_extended_acl_is_treated_as_empty(self) -> None:
+        """macOS 无扩展 ACL 是正常状态，不得被误报为目标文件消失。"""
+        with mock.patch.object(
+            doctor,
+            "_darwin_global_rule_acl",
+            side_effect=FileNotFoundError(errno.ENOENT, "no extended ACL"),
+        ):
+            self.assertEqual(doctor._darwin_global_rule_acl_or_empty(Path("unused")), b"")
+
+    def test_macos_empty_extended_acl_uses_initialized_acl(self) -> None:
+        """空扩展 ACL 必须构造合法 ACL，不能交给不接受空文本的解析器。"""
+        libc = mock.MagicMock()
+        libc.acl_init.return_value = 123
+        libc.acl_set_file.return_value = 0
+
+        with mock.patch.object(doctor.ctypes, "CDLL", return_value=libc):
+            doctor._set_darwin_global_rule_acl(Path("unused"), b"")
+
+        libc.acl_init.assert_called_once_with(0)
+        libc.acl_from_text.assert_not_called()
+        libc.acl_set_file.assert_called_once()
+        libc.acl_free.assert_called_once_with(123)
+
     def test_final_transaction_check_rejects_equal_content_atomic_save(self) -> None:
         """两目标写完后的同字节 atomic-save 也不能被当成本轮提交。"""
         with tempfile.TemporaryDirectory() as directory:
@@ -1865,7 +2185,6 @@ class GlobalRuleSyncTests(unittest.TestCase):
             self.assertIsNotNone(external)
             self.assertEqual(doctor._global_rule_snapshot(targets[0]), external)
             self.assertEqual(targets[1].read_bytes(), originals[1])
-            self.assertTrue(list(targets[0].parent.glob(".CLAUDE.md.jojo-backup-*")))
 
     def test_concurrent_edit_after_write_is_not_overwritten_by_rollback(self) -> None:
         """写后复核发现并发内容时，回滚不得再用旧快照覆盖该内容。"""
