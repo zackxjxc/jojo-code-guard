@@ -53,6 +53,7 @@ class ClaudeAdapterTests(unittest.TestCase):
         routed_references = (
             "references/通用行为规则.md",
             "references/通用文件守护.md",
+            "references/长任务输出控制.md",
             "references/C++专项规则.md",
             "references/Git操作规则.md",
         )
@@ -321,6 +322,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             "skills/jojo-code-guard/SKILL.md",
             "skills/jojo-code-guard/references/通用行为规则.md",
             "skills/jojo-code-guard/references/通用文件守护.md",
+            "skills/jojo-code-guard/references/长任务输出控制.md",
             "skills/jojo-code-guard/references/C++专项规则.md",
             "skills/jojo-code-guard/references/Git操作规则.md",
             "skills/jojo-code-guard/PowerShell规则.md",
@@ -448,6 +450,7 @@ class ClaudeAdapterTests(unittest.TestCase):
         relative_paths = (
             Path("skills/jojo-code-guard/references/通用行为规则.md"),
             Path("skills/jojo-code-guard/references/通用文件守护.md"),
+            Path("skills/jojo-code-guard/references/长任务输出控制.md"),
             Path("skills/jojo-code-guard/references/C++专项规则.md"),
             Path("skills/jojo-code-guard/references/Git操作规则.md"),
             Path("skills/jojo-code-guard/PowerShell规则.md"),
