@@ -191,6 +191,32 @@ class RuleSemanticTests(unittest.TestCase):
             r"无 marker 的 partial staging.*?不做递归清理.*?保留并报告精确路径",
         )
 
+    def test_long_task_output_control_is_progressively_routed(self) -> None:
+        """大量日志控制必须按需加载，且不得以节省上下文为由弱化验证。"""
+        router = _read(SKILL_ROOT / "SKILL.md")
+        guidance_path = REFERENCES / "长任务输出控制.md"
+
+        self.assertTrue(guidance_path.is_file())
+        guidance = _collapse_whitespace(_read(guidance_path))
+
+        self.assertRegex(
+            router,
+            r"长时间构建、测试、反复诊断[^\n]*"
+            r"\[长任务输出控制\]\(references/长任务输出控制\.md\)",
+        )
+        for anchor in (
+            "200 行",
+            "16 KiB",
+            "操作系统临时",
+            "真实退出码",
+            "密钥、令牌或用户数据",
+            "前 20 个",
+            "连续三次同类尝试",
+            "不得成为跳过编译、测试、警告审查或必要验证的理由",
+        ):
+            with self.subTest(anchor=anchor):
+                self.assertIn(anchor, guidance)
+
 
 class RuleEntrypointTests(unittest.TestCase):
     """验证 SessionStart 和 Claude 命令都会引导读取完整的强制基线。"""

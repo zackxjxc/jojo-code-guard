@@ -32,6 +32,7 @@ description: Use when a session starts, or when a task may inspect or change loc
 | 只读查看本地项目 | 项目根目录 `AGENTS.md`（如果存在）；不执行编辑前后检查 |
 | 只读诊断本地文件的编码、BOM、换行、乱码、异常 diff 或整文件变化 | [通用文件守护](references/通用文件守护.md)；需要确定性检查时同时读取 [使用与工具说明](references/usage.md) |
 | 创建、修改、移动、删除、格式化或生成任意本地文件 | [通用文件守护](references/通用文件守护.md) |
+| 长时间构建、测试、反复诊断，或预计单个命令、文件、大型 diff 产生大量输出 | [长任务输出控制](references/长任务输出控制.md) |
 | 处理 C/C++、Visual Studio/MSVC 工程或资源文件 | [C++ 专项规则](references/C++专项规则.md)；发生文件修改时同时读取通用守护 |
 | 编写、修改、评审或诊断 `.ps1`、`.psm1`、`.psd1`、`.bat`、`.cmd`，或设计复杂 PowerShell 进程/提权/重定向命令 | [PowerShell规则.md](PowerShell规则.md)；发生文件修改时同时读取通用守护 |
 | 暂存、提交、推送、改写或检查历史、配置 Git、安装 Hook 或审查提交边界 | [Git 操作规则](references/Git操作规则.md)；发生文件修改时同时读取通用守护 |

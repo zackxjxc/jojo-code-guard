@@ -876,6 +876,7 @@ def _validate_adapter(destination: pathlib.Path) -> None:
         destination / "skills" / "jojo-code-guard" / "PowerShell规则.md",
         destination / "skills" / "jojo-code-guard" / "references" / "通用行为规则.md",
         destination / "skills" / "jojo-code-guard" / "references" / "通用文件守护.md",
+        destination / "skills" / "jojo-code-guard" / "references" / "长任务输出控制.md",
         destination / "skills" / "jojo-code-guard" / "references" / "C++专项规则.md",
         destination / "skills" / "jojo-code-guard" / "references" / "Git操作规则.md",
         destination / "skills" / "jojo-code-guard" / "references" / "usage.md",
