@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import difflib
+import errno
 import hashlib
 import json
 import os
@@ -1812,11 +1813,16 @@ def _global_rule_path_is_junction(path: Path) -> bool:
     return bool(attributes & reparse_point)
 
 
+def _is_macos_system_path_alias(path: Path) -> bool:
+    """仅允许 macOS 根目录固定的 BSD 兼容路径别名。"""
+    return sys.platform == "darwin" and path.as_posix() in {"/var", "/tmp", "/etc"}
+
+
 def _assert_global_rule_path_safe(target: Path) -> None:
     """拒绝目标或任一父路径经符号链接、junction 或普通文件重定向。"""
     absolute = target.absolute()
     for index, candidate in enumerate((absolute, *absolute.parents)):
-        if candidate.is_symlink():
+        if candidate.is_symlink() and not _is_macos_system_path_alias(candidate):
             raise RuntimeError(f"路径包含符号链接，拒绝跟随写入：{candidate}")
         if _global_rule_path_is_junction(candidate):
             raise RuntimeError(f"路径包含 junction，拒绝跟随写入：{candidate}")
@@ -2044,10 +2050,23 @@ def _darwin_global_rule_acl(path: Path) -> bytes:
         acl_free(acl)
 
 
+def _darwin_global_rule_acl_or_empty(path: Path) -> bytes:
+    """macOS 将不存在的扩展 ACL 规范化为空，而非目标文件缺失。"""
+    try:
+        return _darwin_global_rule_acl(path)
+    except OSError as error:
+        if error.errno == errno.ENOENT:
+            return b""
+        raise
+
+
 def _set_darwin_global_rule_acl(path: Path, acl_text: bytes) -> None:
     """从快照文本恢复 macOS 扩展 ACL。"""
     acl_type_extended = 0x00000100
     libc = ctypes.CDLL(None, use_errno=True)
+    acl_init = libc.acl_init
+    acl_init.argtypes = (ctypes.c_int,)
+    acl_init.restype = ctypes.c_void_p
     acl_from_text = libc.acl_from_text
     acl_from_text.argtypes = (ctypes.c_char_p,)
     acl_from_text.restype = ctypes.c_void_p
@@ -2058,7 +2077,8 @@ def _set_darwin_global_rule_acl(path: Path, acl_text: bytes) -> None:
     acl_free.argtypes = (ctypes.c_void_p,)
     acl_free.restype = ctypes.c_int
 
-    acl = acl_from_text(acl_text)
+    # acl_from_text 不接受空文本；acl_init(0) 才是 macOS 的合法空 ACL。
+    acl = acl_init(0) if not acl_text else acl_from_text(acl_text)
     if not acl:
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error), str(path))
@@ -2104,7 +2124,7 @@ def _global_rule_metadata(target: Path, info: os.stat_result) -> _GlobalRuleMeta
     )
     if file_flags is not None and file_flags & immutable_flags:
         raise RuntimeError("目标使用 append/immutable 文件标志，拒绝自动替换")
-    darwin_acl = _darwin_global_rule_acl(target) if sys.platform == "darwin" else None
+    darwin_acl = _darwin_global_rule_acl_or_empty(target) if sys.platform == "darwin" else None
     return _GlobalRuleMetadata(
         None,
         None,
@@ -2415,37 +2435,57 @@ def _global_rule_same_object_except_windows_dacl(
 
 def _normalize_windows_global_rule_dacl_for_replace(
     descriptor_data: bytes | None,
-) -> bytes | None:
-    """清除 ReplaceFileW 会重算的自动继承位；ACL 内容、顺序和访问掩码仍须一致。"""
+) -> tuple[int, bytes | None] | None:
+    """提取规则文件 DACL 语义，忽略 ReplaceFileW 的后代继承传播位。"""
     if descriptor_data is None:
         return None
     if len(descriptor_data) < 20:
         raise RuntimeError("Windows DACL 安全描述符过短")
-    normalized = bytearray(descriptor_data)
-    control = int.from_bytes(normalized[2:4], "little") & ~0x0400
-    normalized[2:4] = control.to_bytes(2, "little")
-    dacl_offset = int.from_bytes(normalized[16:20], "little")
+    # SE_SELF_RELATIVE、SE_DACL_DEFAULTED、SE_DACL_AUTO_INHERIT_REQ 和
+    # SE_DACL_AUTO_INHERITED 只描述序列化/继承过程；SE_DACL_PROTECTED 保持可见。
+    control = int.from_bytes(descriptor_data[2:4], "little") & ~0x8508
+    dacl_offset = int.from_bytes(descriptor_data[16:20], "little")
     if dacl_offset == 0:
-        return bytes(normalized)
-    if dacl_offset + 8 > len(normalized):
+        return control, None
+    if dacl_offset + 8 > len(descriptor_data):
         raise RuntimeError("Windows DACL 偏移越出安全描述符")
-    acl_size = int.from_bytes(normalized[dacl_offset + 2:dacl_offset + 4], "little")
-    ace_count = int.from_bytes(normalized[dacl_offset + 4:dacl_offset + 6], "little")
+    acl_size = int.from_bytes(descriptor_data[dacl_offset + 2:dacl_offset + 4], "little")
+    ace_count = int.from_bytes(descriptor_data[dacl_offset + 4:dacl_offset + 6], "little")
     acl_end = dacl_offset + acl_size
-    if acl_size < 8 or acl_end > len(normalized):
+    if acl_size < 8 or acl_end > len(descriptor_data):
         raise RuntimeError("Windows ACL 长度无效")
-    cursor = dacl_offset + 8
+    normalized_acl = bytearray(descriptor_data[dacl_offset:acl_end])
+    cursor = 8
+    aces: list[bytes] = []
     for _ in range(ace_count):
-        if cursor + 4 > acl_end:
+        if cursor + 4 > len(normalized_acl):
             raise RuntimeError("Windows ACE 头越出 ACL")
-        ace_size = int.from_bytes(normalized[cursor + 2:cursor + 4], "little")
-        if ace_size < 4 or cursor + ace_size > acl_end:
+        ace_size = int.from_bytes(normalized_acl[cursor + 2:cursor + 4], "little")
+        if ace_size < 4 or cursor + ace_size > len(normalized_acl):
             raise RuntimeError("Windows ACE 长度无效")
-        normalized[cursor + 1] &= ~0x10  # INHERITED_ACE 由 ReplaceFileW 重新计算
+        # 规则目标始终是普通文件：这四个标志只控制其假想后代的继承，
+        # ReplaceFileW 可按新父目录重新计算它们。INHERIT_ONLY_ACE (0x08)
+        # 会改变当前文件的有效访问权，故必须保留；ACE 类型、顺序与掩码也保留。
+        normalized_acl[cursor + 1] &= ~0x17
+        aces.append(bytes(normalized_acl[cursor:cursor + ace_size]))
         cursor += ace_size
-    if cursor > acl_end:
+    if cursor > len(normalized_acl):
         raise RuntimeError("Windows ACE 列表越出 ACL")
-    return bytes(normalized)
+    # GitHub Windows 的 ReplaceFileW 会把整组继承 ACE 精确重复。DACL 不包含
+    # 审计 ACE，完整序列的逐字节重复不改变 allow/deny 的有效授权；仅折叠这种
+    # 周期性完整重复，不合并不同 ACE、不重排、也不放宽访问掩码。
+    for period in range(1, len(aces)):
+        if len(aces) % period or any(
+            ace != aces[index % period] for index, ace in enumerate(aces)
+        ):
+            continue
+        reduced_aces = aces[:period]
+        reduced = bytearray(normalized_acl[:8])
+        reduced_size = 8 + sum(len(ace) for ace in reduced_aces)
+        reduced[2:4] = reduced_size.to_bytes(2, "little")
+        reduced[4:6] = period.to_bytes(2, "little")
+        return control, bytes(reduced + b"".join(reduced_aces))
+    return control, bytes(normalized_acl)
 
 
 def _require_secure_private_directory_support() -> None:

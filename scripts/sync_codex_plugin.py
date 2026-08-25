@@ -90,11 +90,16 @@ def _path_exists_without_following(path: pathlib.Path) -> bool:
     return True
 
 
+def _is_macos_system_path_alias(path: pathlib.Path) -> bool:
+    """仅允许 macOS 根目录固定的 BSD 兼容路径别名。"""
+    return sys.platform == "darwin" and path.as_posix() in {"/var", "/tmp", "/etc"}
+
+
 def _first_link_like_ancestor(path: pathlib.Path) -> pathlib.Path | None:
     """从目标向文件系统根检查每个现存路径组件。"""
     current = path.absolute()
     while True:
-        if _path_is_link_like(current):
+        if _path_is_link_like(current) and not _is_macos_system_path_alias(current):
             return current
         parent = current.parent
         if parent == current:
@@ -252,7 +257,7 @@ def _same_identity(path: pathlib.Path, expected: object) -> bool:
 
 
 def _assert_identity(path: pathlib.Path, expected: object, label: str) -> None:
-    if _path_is_link_like(path):
+    if _path_is_link_like(path) and not _is_macos_system_path_alias(path):
         raise RuntimeError(f"{label}变为链接/reparse 路径：{path}")
     if not _same_identity(path, expected):
         raise RuntimeError(f"{label}身份在操作期间发生变化：{path}")
@@ -263,7 +268,7 @@ def _capture_ancestor_snapshot(path: pathlib.Path) -> list[dict[str, object]]:
     current = _absolute(path)
     snapshot: list[dict[str, object]] = []
     while True:
-        if _path_is_link_like(current):
+        if _path_is_link_like(current) and not _is_macos_system_path_alias(current):
             raise RuntimeError(f"拒绝经由链接型安装路径操作目录：{current}")
         if not _path_exists_without_following(current):
             raise RuntimeError(f"安装路径的父目录不存在：{current}")

@@ -23,6 +23,84 @@ SYNCHRONIZERS = (sync_claude_plugin, sync_codex_plugin)
 class SyncTransactionSafetyTests(unittest.TestCase):
     """验证同步事务绝不删除或覆盖身份不明的并发目录项。"""
 
+    def test_macos_system_aliases_are_distinguished_from_user_links(self) -> None:
+        """同步器只能白名单 macOS 固定根目录别名，不能放行 /var 下的用户链接。"""
+        for synchronizer in SYNCHRONIZERS:
+            with self.subTest(synchronizer=synchronizer.__name__):
+                with mock.patch.object(synchronizer.sys, "platform", "darwin"):
+                    self.assertTrue(synchronizer._is_macos_system_path_alias(Path("/var")))
+                    self.assertTrue(synchronizer._is_macos_system_path_alias(Path("/tmp")))
+                    self.assertTrue(synchronizer._is_macos_system_path_alias(Path("/etc")))
+                    self.assertFalse(
+                        synchronizer._is_macos_system_path_alias(Path("/var/folders"))
+                    )
+
+                with mock.patch.object(
+                    synchronizer,
+                    "_path_is_link_like",
+                    return_value=True,
+                ), mock.patch.object(
+                    synchronizer,
+                    "_is_macos_system_path_alias",
+                    return_value=True,
+                ), mock.patch.object(
+                    synchronizer,
+                    "_same_identity",
+                    return_value=True,
+                ):
+                    synchronizer._assert_identity(Path("system-alias"), {}, "测试路径")
+
+                with mock.patch.object(
+                    synchronizer,
+                    "_path_is_link_like",
+                    return_value=True,
+                ), mock.patch.object(
+                    synchronizer,
+                    "_is_macos_system_path_alias",
+                    return_value=False,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "链接/reparse"):
+                        synchronizer._assert_identity(Path("user-link"), {}, "测试路径")
+
+    def test_macos_system_alias_survives_ancestor_capture_and_recheck(self) -> None:
+        """事务祖先快照与复核都必须放行固定 macOS 系统别名。"""
+        for synchronizer in SYNCHRONIZERS:
+            with self.subTest(synchronizer=synchronizer.__name__):
+                alias = Path("/var")
+
+                def is_var_alias(path: Path) -> bool:
+                    return path.as_posix() == "/var"
+
+                with mock.patch.object(synchronizer.sys, "platform", "darwin"), mock.patch.object(
+                    synchronizer,
+                    "_absolute",
+                    return_value=alias,
+                ), mock.patch.object(
+                    synchronizer,
+                    "_path_is_link_like",
+                    side_effect=is_var_alias,
+                ), mock.patch.object(
+                    synchronizer,
+                    "_path_exists_without_following",
+                    return_value=True,
+                ), mock.patch.object(
+                    synchronizer,
+                    "_path_identity",
+                    return_value={"device": 1, "inode": 2, "type": 3},
+                ):
+                    snapshot = synchronizer._capture_ancestor_snapshot(alias)
+
+                with mock.patch.object(synchronizer.sys, "platform", "darwin"), mock.patch.object(
+                    synchronizer,
+                    "_path_is_link_like",
+                    side_effect=is_var_alias,
+                ), mock.patch.object(
+                    synchronizer,
+                    "_same_identity",
+                    return_value=True,
+                ):
+                    synchronizer._assert_ancestor_snapshot(snapshot)
+
     def test_owned_tree_cleanup_never_deletes_a_racing_replacement(self) -> None:
         """rmtree 前路径被替换时，外部目录必须继续存在。"""
         for synchronizer in SYNCHRONIZERS:
