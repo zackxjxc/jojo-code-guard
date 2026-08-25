@@ -60,14 +60,14 @@ PLUGIN_RESOURCE_SHA256 = {
     "skills/jojo-code-guard-help/agents/openai.yaml": "c907aeb761e7afc7f629c34f239dd962a534704281006862cd8dcace2d480ee6",
 }
 CLAUDE_PLUGIN_RESOURCE_SHA256 = {
-    ".claude-plugin/plugin.json": "d55227a6c760890a99137692ab51fb5aebf21d435675e56c508b48c649a871be",
-    ".claude-plugin/marketplace.json": "9b90a7dd6c2dde5461bf89042c6c7f46dccce4e90d99255c3ccd35414f5e51c5",
+    ".claude-plugin/plugin.json": "ba9ea3dc465429f85187a08a0ef3df21f2549098ba28a04df0186a39fd80a241",
+    ".claude-plugin/marketplace.json": "11ba2467033305555e67f4bafee6acc11962b9525b2f1da63a2dc0391b98bb68",
     "commands/doctor.md": "1e739c4bec55f99b92dac4a61028bb2399b09b2360fdc4f34774bb391e036bd2",
     "commands/check-diff.md": "63e07127637131767d5f03618d3689b8e0d1387ffc29f66f391bbfa65fe0512f",
     "commands/help.md": "41a764ee9cedcbd7e8587fea18e07ad41da64473cc195f245480f47d5848b8f8",
 }
 CODEX_PLUGIN_RESOURCE_SHA256 = {
-    ".codex-plugin/plugin.json": "e74210f7993624f2e6125492a89bd41718022cee90345bb7fc089906ee3290d3",
+    ".codex-plugin/plugin.json": "0fd5d44ed4b10ae2ca7683504fdc175852fb7e528887088f0e6253c78dd27cfa",
 }
 PUBLIC_SKILL_ENTRYPOINTS = frozenset(
     {
