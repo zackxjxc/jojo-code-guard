@@ -4,14 +4,14 @@
     "name": "zackxjxc"
   },
   "metadata": {
-    "description": "C++ 编码、换行和 Git diff 保护工具",
+    "description": "编码、BOM、换行和 Git diff 保护工具",
     "version": "0.2.14"
   },
   "plugins": [
     {
       "name": "jojo-code-guard",
       "source": "./",
-      "description": "保护 C++ 仓库的编码、换行、Git diff 和 AI 修改",
+      "description": "保护文本文件的编码、BOM、换行和可审阅 diff",
       "version": "0.2.14",
       "strict": true
     }
