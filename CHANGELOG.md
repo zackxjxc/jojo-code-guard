@@ -2,7 +2,7 @@
 
 本文件记录 jojo-code-guard 的重要变更。
 
-## [Unreleased]
+## [0.2.15] - 2026-08-27
 
 - 改用客户端原生 Skill 与 `AGENTS.md` 发现，不再由 SessionStart 注入加载指令或要求每个回复重读规则。
 - 删除 UserPromptSubmit 全量扫描；PreToolUse 只记录轻量快照，PostToolUse 仅在真实变化后完整检查，Stop 只兜底本轮写入状态。
