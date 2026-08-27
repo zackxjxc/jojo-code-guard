@@ -1,36 +1,26 @@
 ---
 name: jojo-code-guard-doctor
-description: 按需诊断设备、Git、仓库保护和全局规则；默认只读，修复、同步或安装工具前必须取得用户确认。
+description: Diagnose jojo-code-guard's core Python/Git runtime, repository text rules, lifecycle hooks, optional pre-commit, and legacy duplicate-loading configuration. Read-only unless the user explicitly requests repair or Hook installation.
 ---
 
-# 啾啾代码守护：检查环境
+# 啾啾代码守护：核心诊断
 
-这是 `jojo-code-guard` 的低频诊断入口，不替代主 Skill 的日常编辑规则。
+先完整读取同一插件中的 [`../jojo-code-guard/SKILL.md`](../jojo-code-guard/SKILL.md)，再读取主 Skill 指向的
+[使用与工具说明](../jojo-code-guard/references/usage.md)。不要加载所有任务通用规则或无关专项文档。
 
-执行本入口前必须完整读取同一插件中的 [`../jojo-code-guard/SKILL.md`](../jojo-code-guard/SKILL.md)，应用
-其中的所有任务基线，并按主 Skill 的场景路由加载本操作命中的模块；无法读取时暂停并报告。
-
-## 执行要求
-
-1. 先读取当前仓库根目录的 `AGENTS.md`（如果存在）、`.editorconfig`、`.gitattributes` 和可选的 `.vscode/settings.json`。
-2. 使用主 Skill 目录中的 `scripts/doctor.py` 执行只读诊断：
+默认只读运行：
 
 ```text
 python "<jojo-code-guard>/scripts/doctor.py" --repo .
 ```
 
-3. 报告 `OK`、`WARNING`、`ACTION_REQUIRED` 和 `BLOCKED`，包括两个用户级全局规则目标的差异状态。
-4. 默认只读，不自动转码、格式化、安装工具或写入仓库配置；同时报告 Claude/Codex 插件版本、启用状态、
-   `SessionStart`、`PostToolUse`、`Stop` 和本地 Hook 复制脚本是否过期。
-5. 只读查询远端发布版本；Skill 不会自行更新，发现新版本时提示用户更新并重启对应客户端。
-6. 全局规则同步先用 `--sync-global-rules` 预览 jojo-code-guard 自动加载节的差异。
-7. 只有用户明确确认后，才为写入操作追加 `--yes`。
-8. 插件缺失或禁用时只报告安装、启用命令，不复制 Hook 或改写用户设置；Codex Hook 信任和两端实际执行
-   必须单列为人工验收项，本 Skill 不根据配置或缓存虚构已信任、已执行状态。
+报告 Python 3、Git、当前仓库规则、生命周期 Hook、可选 pre-commit，以及 0.2.x 遗留的用户级自动加载节或
+手工 SessionStart Hook。doctor 不联网检查更新，不安装设备工具，不写入用户级规则，也不把静态配置或
+缓存存在虚构成 Hook 已实际执行。
 
-## 适用场景
+只有用户明确授权后才使用：
 
-- 用户要求检查设备、Git 或仓库配置。
-- 检查或同步 Claude 与 Codex 用户级全局规则中的 jojo-code-guard 自动加载节。
-- 准备安装 pre-commit hook。
-- 需要确认 PowerShell 7、Python、Git LFS 等工具是否可用。
+- `--repair --yes`：创建缺失的仓库基础配置并设置 local Git 保护项；不覆盖已有文件。
+- `--install-hook --yes`：安装或更新 jojo 自有的可选 pre-commit；不覆盖第三方 Hook。
+
+旧版全局规则和用户级 Hook 只报告精确位置，由用户审阅后迁移；不得删除同文件中的其他自定义规则。

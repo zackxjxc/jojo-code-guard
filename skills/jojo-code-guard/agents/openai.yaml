@@ -1,6 +1,6 @@
 interface:
   display_name: "jojo-code-guard"
-  short_description: "按任务守护编码、换行和最小 diff，纯对话不读取项目"
-  default_prompt: "使用 $jojo-code-guard 先执行消息级检查并读取所有任务通用行为基线，再只加载本轮实际需要的文件、C++、PowerShell 或 Git 专项规则。"
+  short_description: "保护已有文件的编码、换行与最小 diff"
+  default_prompt: "使用 $jojo-code-guard 检查本次文件修改是否保留编码、BOM、换行和最小 diff。"
 policy:
   allow_implicit_invocation: true

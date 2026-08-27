@@ -1,6 +1,6 @@
 interface:
   display_name: "jojo-code-guard:doctor"
-  short_description: "诊断设备、仓库与全局规则"
-  default_prompt: "使用 $jojo-code-guard-doctor 检查设备、仓库和全局规则，默认只读并报告修复或同步影响。"
+  short_description: "诊断核心运行时、仓库规则与 Hook"
+  default_prompt: "使用 $jojo-code-guard-doctor 只读检查当前仓库、生命周期 Hook 和旧版重复加载配置。"
 policy:
   allow_implicit_invocation: true

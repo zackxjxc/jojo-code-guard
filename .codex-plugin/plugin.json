@@ -1,7 +1,7 @@
 {
   "name": "jojo-code-guard",
   "version": "0.2.14",
-  "description": "Protect C++ repositories from encoding, line-ending, Git diff, and AI-edit pollution.",
+  "description": "Preserve text encoding, BOM, line endings, and reviewable Git diffs during AI edits.",
   "author": {
     "name": "zackxjxc",
     "url": "https://github.com/zackxjxc"
@@ -19,8 +19,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "啾啾代码守护",
-    "shortDescription": "保护 C++ 编码、换行、Git diff 与 AI 修改",
-    "longDescription": "自动保护老项目编码、BOM、换行和最小 diff，并检查设备、Git、仓库配置与可选 Git 检查 hook。",
+    "shortDescription": "保护编码、BOM、换行与最小 diff",
+    "longDescription": "只在真实文件写入后检查编码、BOM、换行和异常 diff，并提供精简的仓库诊断与可选 Git 门禁。",
     "developerName": "啾啾代码守护",
     "category": "Developer Tools",
     "capabilities": [
@@ -29,7 +29,7 @@
     ],
     "defaultPrompt": [
       "使用 jojo-code-guard 守护当前仓库。",
-      "检查当前设备、仓库和全局规则配置。"
+      "检查当前仓库和生命周期 Hook 的核心配置。"
     ]
   }
 }

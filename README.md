@@ -2,8 +2,8 @@
 
 **防止 AI 修改代码时大面积污染旧代码，并为 C++、PowerShell 与 Git 工作流提供可靠的工程约束。**
 
-jojo-code-guard（啾啾代码守护）是面向 Codex 和 Claude Code 的工程守护插件。它通过会话级规则、修改前后
-基线检查和可选的 Git 门禁，约束 AI 从理解任务、编辑文件到验证和提交的整个过程。
+jojo-code-guard（啾啾代码守护）是面向 Codex 和 Claude Code 的文件与 diff 守护插件。它通过原生 Skill
+发现、真实写入前后的字节基线和可选 Git 门禁，保护编码、BOM、换行及可审阅的局部修改。
 
 AI 生成代码通常不是最难的部分，难的是让一次修改尊重已有工程：只改几行逻辑，却把整个文件的编码或换行
 重写了；在 PowerShell 里丢失参数边界、误判退出码，或反复踩中 PS 5.1 与 7 的兼容差异；提交时又把用户
@@ -17,12 +17,12 @@ AI 生成代码通常不是最难的部分，难的是让一次修改尊重已�
 | 能力 | 主要解决的问题 |
 | --- | --- |
 | 文件与 diff 守护 | 记录编码、BOM、换行和已有修改，发现整文件重写、异常 diff、Git 空白错误和权限位变化 |
-| AI 通用代码规范 | 控制任务范围，避免过度设计和无关重构，优先复用现有能力，并约束命名、注释、文档与验证质量 |
+| 按需工程参考 | 保留 C++、PowerShell、Git 和长任务参考，但只在目标实际命中时读取，不进入普通对话上下文 |
 | C++/MSVC 专项规则 | 保护混合编码老文件，避免顺手整理 include 或全仓格式化，并处理资源文件与旧工具链兼容例外 |
 | PowerShell/批处理规则 | 处理 PS 5.1/7 编码差异、参数边界、`Start-Process`、退出码、窗口与重定向、提权、进程树和跨 shell 调用 |
 | Git 与提交规范 | 提交前检查状态和 diff，不混入无关修改；按可审阅、可回退的功能单元提交，并遵循项目提交信息约定 |
 | 长任务与故障诊断 | 控制构建和测试日志规模，同时保留真实退出码、最早根因、关键警告和足够的诊断证据 |
-| 自动检查与环境体检 | 在会话开始、工具写入后和交付前检查；通过 `doctor`、`check-diff` 与可选 `pre-commit` Hook 补充机械门禁 |
+| 自动检查与环境体检 | 潜在写入前记录轻量快照，真实变化后检查；通过 `doctor`、`check-diff` 与可选 `pre-commit` 补充门禁 |
 
 PowerShell 规则并不是泛泛的代码风格建议，而是针对那些经常让 AI 与脚本反复“搏斗”的真实陷阱；通用代码
 规范也不会要求全仓统一格式，而是优先保证修改范围合理、实现不过度、结果可验证。
@@ -36,8 +36,9 @@ PowerShell 规则并不是泛泛的代码风格建议，而是针对那些经常
 3. **改完复查**：检查实际变更、Git 空白错误、权限位和意外新增文件。
 4. **发现异常就停下**：能够依据基线安全恢复时做最小修复；无法确定时明确报告，不猜测原始状态。
 
-插件的生命周期 Hook 会尽量自动完成这些检查；如果客户端没有启用或信任 Hook，主 Skill 仍会要求 AI
-执行同样的修改前后检查。你也可以选择安装 Git `pre-commit` Hook，给提交阶段再加一道机械门禁。
+插件的生命周期 Hook 只在潜在写入工具调用前后工作：只读命令和未变化工作区不运行完整检查，`Stop` 只
+兜底本轮已有写入状态。如果客户端没有启用或信任 Hook，主 Skill 仍会指导相同的修改前后检查。你也可以
+选择安装 Git `pre-commit` Hook，给提交阶段再加一道机械门禁。
 
 ## 它不会替你做什么
 
@@ -74,20 +75,21 @@ codex plugin add jojo-code-guard@jojo-code-guard
 
 ## 装好以后怎么用
 
-日常使用不需要背命令。像平时一样描述任务即可，例如：
+日常使用不需要背命令。Codex 根据 Skill 描述按需加载；纯聊天不会加载 jojo 或扫描 Git。像平时一样描述
+文件任务即可，例如：
 
 ```text
 帮我修复这个解析函数，保留文件现在的编码和换行，不要动其他模块。
 ```
 
-jojo-code-guard 会在会话中自动加载。第一次在一个仓库里使用时，建议先说：
+第一次在一个仓库里使用时，可以先说：
 
 ```text
 请使用 jojo-code-guard 的 doctor 检查当前仓库。
 ```
 
-`doctor` 默认只读；只读诊断会检查字符编码、BOM、EOL/换行和当前 diff，也会检查设备、Git、仓库配置、插件完整性和远端版本。
-看完报告后，再决定是否补充配置或安装可选的 Git Hook。
+`doctor` 默认只读，只检查 Python/Git 核心运行时、仓库规则、生命周期 Hook、可选 pre-commit 和旧版重复
+加载配置；不联网检查更新，也不安装设备工具。看完报告后，再决定是否补充配置或安装可选 Git Hook。
 
 几个低频入口也可以直接用自然语言调用：
 
@@ -96,14 +98,10 @@ jojo-code-guard 会在会话中自动加载。第一次在一个仓库里使用�
 | 日常守护 | `使用 jojo-code-guard 守护当前仓库` |
 | 环境体检 | `使用 jojo-code-guard 的 doctor 检查当前环境` |
 | 验收当前 diff | `使用 jojo-code-guard 的 check-diff 检查未提交修改` |
-| 查看帮助 | `使用 jojo-code-guard 的 help 说明功能和安全边界` |
 
-Codex 中也可以直接选择 `jojo-code-guard`、`jojo-code-guard-doctor`、
-`jojo-code-guard-check-diff` 和 `jojo-code-guard-help`；Claude Code 对应的命令形式是
-`/jojo-code-guard:doctor`、`/jojo-code-guard:check-diff` 和 `/jojo-code-guard:help`。
-
-想确认 Skill 是否真的加载了吗？在新会话里说一句“天王盖地虎”。如果它回答
-`Price tower shock river monster`，说明暗号接头成功。
+Codex 中可以直接选择 `jojo-code-guard`、`jojo-code-guard-doctor` 和
+`jojo-code-guard-check-diff`。Claude Code 也通过同一组 Skills 或自然语言调用，不再额外发布会被 Codex
+迁移成重复入口的 `commands/`。
 
 ## 升级
 
@@ -122,7 +120,8 @@ Claude Code 中执行：
 /plugin install jojo-code-guard@jojo-code-guard
 ```
 
-升级后请重新打开会话。已经打开的会话不会自动换成新版本；Skill 本身也不会在运行中静默更新自己。
+升级后请重新打开会话。0.2.x 若曾在用户级 `AGENTS.md`/`CLAUDE.md` 写入自动加载节，或创建手工
+`SessionStart` Hook，doctor 会报告精确位置；审阅后移除旧来源，避免它与 0.3 的原生发现重复执行。
 
 ## 常见问题
 
@@ -161,8 +160,8 @@ Claude Code 中执行：
 - [主 Skill 规则](./skills/jojo-code-guard/SKILL.md)
 - [更新日志](./CHANGELOG.md)
 
-README 有意只保留使用者最需要知道的部分。Hook 时序、全局规则同步、适配包事务安全、特殊文件类型和一次性
-迁移参数等实现细节，都记录在上面的完整文档与源码中。
+README 有意只保留使用者最需要知道的部分。Hook 时序、特殊文件类型和一次性迁移参数等实现细节，都记录
+在上面的完整文档与源码中。
 
 ## 本地开发
 
@@ -177,12 +176,6 @@ python scripts/select_tests.py --run
 
 ```bash
 python -B -m unittest discover -s tests
-```
-
-从 Windows 发布 Hook 变更时，还要确认 Unix 可执行位没有丢失：
-
-```bash
-git add --chmod=+x hooks/session-start hooks/post-write-check
 ```
 
 如果这个项目替你挡住过一次“只改三行，却整份文件变红”的事故，那它就已经完成了自己的工作。

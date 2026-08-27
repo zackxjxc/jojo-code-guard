@@ -7,8 +7,8 @@ description: 按需检查当前仓库的编码、BOM、换行、Git 空白错误
 
 这是 `jojo-code-guard` 的低频差异验收入口，不替代主 Skill 的日常编辑规则。
 
-执行本入口前必须完整读取同一插件中的 [`../jojo-code-guard/SKILL.md`](../jojo-code-guard/SKILL.md)，应用
-其中的所有任务基线，并按主 Skill 的场景路由加载本操作命中的模块；无法读取时暂停并报告。
+执行本入口前完整读取同一插件中的 [`../jojo-code-guard/SKILL.md`](../jojo-code-guard/SKILL.md)，再读取主
+Skill 指向的 [使用与工具说明](../jojo-code-guard/references/usage.md)。不要加载所有任务通用规则或无关专项文档。
 
 ## 执行要求
 
