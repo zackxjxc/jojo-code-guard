@@ -93,7 +93,11 @@ class LeanSkillSemanticsTests(unittest.TestCase):
             self.assertNotIn("通用行为规则.md", content)
 
     def test_hook_sources_cannot_request_skill_reload_or_copy_final_answer(self) -> None:
-        combined = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "hooks").glob("*"))
+        combined = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (ROOT / "hooks").glob("*")
+            if path.is_file()
+        )
         for forbidden in (
             "JOJO_CODE_GUARD_LOAD_INSTRUCTION",
             "SKILL.md",
