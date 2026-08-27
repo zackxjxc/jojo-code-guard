@@ -24,6 +24,11 @@ import check_diff
 import hook_baseline
 
 
+def _write_text(path: pathlib.Path, content: str) -> None:
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(content)
+
+
 def _load_lifecycle():
     """用独立模块名加载 Hook，便于注入计数器。"""
     spec = importlib.util.spec_from_file_location("jojo_lifecycle_under_test", HOOK_PATH)
@@ -354,7 +359,7 @@ class DiffFastPathTests(unittest.TestCase):
             subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
-            (repo / "sample.txt").write_text("sample\n", encoding="utf-8", newline="\n")
+            _write_text(repo / "sample.txt", "sample\n")
             subprocess.run(["git", "add", "sample.txt"], cwd=repo, check=True)
             subprocess.run(["git", "commit", "-qm", "initial"], cwd=repo, check=True)
 
