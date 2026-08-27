@@ -5,14 +5,14 @@
   },
   "metadata": {
     "description": "编码、BOM、换行和 Git diff 保护工具",
-    "version": "0.2.14"
+    "version": "0.2.15"
   },
   "plugins": [
     {
       "name": "jojo-code-guard",
       "source": "./",
       "description": "保护文本文件的编码、BOM、换行和可审阅 diff",
-      "version": "0.2.14",
+      "version": "0.2.15",
       "strict": true
     }
   ]

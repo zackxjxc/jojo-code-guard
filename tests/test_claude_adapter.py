@@ -77,7 +77,7 @@ class PluginContractTests(unittest.TestCase):
         marketplace = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
         versions = {codex["version"], claude["version"], marketplace["metadata"]["version"]}
         versions.add(marketplace["plugins"][0]["version"])
-        self.assertEqual(versions, {"0.2.14"})
+        self.assertEqual(versions, {"0.2.15"})
         self.assertRegex(codex["version"], r"^\d+\.\d+\.\d+$")
 
     def test_skill_frontmatter_is_unique_and_matches_directory(self) -> None:
