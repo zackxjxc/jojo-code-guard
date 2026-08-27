@@ -29,10 +29,8 @@ TEST_MODULE_ORDER = (
     "tests.test_rule_semantics",
     "tests.test_claude_adapter",
     "tests.test_claude_doctor",
-    "tests.test_global_rules",
     "tests.test_guard_core",
     "tests.test_install_hook",
-    "tests.test_sync_transaction_safety",
 )
 
 
@@ -93,7 +91,7 @@ def select_tests(paths: Iterable[str]) -> TestSelection:
 
     for path in normalized_paths:
         test_module = _test_module_for_path(path)
-        if test_module is not None:
+        if test_module is not None and (ROOT / path).is_file():
             modules.add(test_module)
             _add_reason(reasons, f"测试文件变更：{path}")
             continue
@@ -115,29 +113,10 @@ def select_tests(paths: Iterable[str]) -> TestSelection:
             _add_reason(reasons, f"跨平台测试基础设施变更：{path}")
             continue
 
-        if path in {
-            "scripts/sync_claude_plugin.py",
-            "scripts/sync_codex_plugin.py",
-        }:
-            modules.update(
-                {
-                    "tests.test_claude_adapter",
-                    "tests.test_sync_transaction_safety",
-                }
-            )
-            cross_platform = True
-            _add_reason(reasons, f"插件同步事务变更：{path}")
-            continue
-
         if path == "skills/jojo-code-guard/scripts/doctor.py":
-            modules.update(
-                {
-                    "tests.test_claude_doctor",
-                    "tests.test_global_rules",
-                }
-            )
+            modules.add("tests.test_claude_doctor")
             cross_platform = True
-            _add_reason(reasons, "doctor/全局规则实现变更")
+            _add_reason(reasons, "核心 doctor 实现变更")
             continue
 
         if path == "skills/jojo-code-guard/scripts/install_hook.py":

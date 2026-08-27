@@ -33,26 +33,26 @@ class TestSelectionTests(unittest.TestCase):
             ),
         )
 
-    def test_doctor_change_selects_global_rules_and_requires_platform_matrix(self) -> None:
+    def test_doctor_change_selects_core_doctor_and_requires_platform_matrix(self) -> None:
         selection = select_tests.select_tests(
             ["skills/jojo-code-guard/scripts/doctor.py"]
         )
 
         self.assertFalse(selection.full)
         self.assertTrue(selection.cross_platform)
-        self.assertEqual(
-            selection.modules,
-            ("tests.test_claude_doctor", "tests.test_global_rules"),
-        )
+        self.assertEqual(selection.modules, ("tests.test_claude_doctor",))
 
-    def test_sync_change_selects_transaction_suites(self) -> None:
+    def test_removed_sync_path_fails_closed_to_full_suite(self) -> None:
         selection = select_tests.select_tests(["scripts\\sync_codex_plugin.py"])
 
+        self.assertTrue(selection.full)
         self.assertTrue(selection.cross_platform)
-        self.assertEqual(
-            selection.modules,
-            ("tests.test_claude_adapter", "tests.test_sync_transaction_safety"),
-        )
+
+    def test_deleted_test_module_fails_closed_to_full_suite(self) -> None:
+        selection = select_tests.select_tests(["tests/test_global_rules.py"])
+
+        self.assertTrue(selection.full)
+        self.assertTrue(selection.cross_platform)
 
     def test_workflow_and_unknown_code_fail_closed_to_full_suite(self) -> None:
         for path in (".github/workflows/test.yml", "scripts/new_shared_helper.py"):
