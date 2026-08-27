@@ -2,6 +2,12 @@
 
 本文件记录 jojo-code-guard 的重要变更。
 
+## [0.2.16] - 2026-08-27
+
+- 仅在 `SessionStart` 的 `compact` 来源发送有界恢复提示，提醒压缩后的文件任务按需重新激活主 Skill。
+- 恢复 Hook 不读取 Skill、项目规则或 Git 状态，不匹配 `startup`、`resume` 或 `clear`，不恢复旧版全量注入。
+- 增加压缩恢复 Hook 的清单、doctor、文档和生命周期回归测试。
+
 ## [0.2.15] - 2026-08-27
 
 - 改用客户端原生 Skill 与 `AGENTS.md` 发现，不再由 SessionStart 注入加载指令或要求每个回复重读规则。

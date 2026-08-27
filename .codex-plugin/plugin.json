@@ -1,6 +1,6 @@
 {
   "name": "jojo-code-guard",
-  "version": "0.2.15",
+  "version": "0.2.16",
   "description": "Preserve text encoding, BOM, line endings, and reviewable Git diffs during AI edits.",
   "author": {
     "name": "zackxjxc",

@@ -77,7 +77,7 @@ class PluginContractTests(unittest.TestCase):
         marketplace = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
         versions = {codex["version"], claude["version"], marketplace["metadata"]["version"]}
         versions.add(marketplace["plugins"][0]["version"])
-        self.assertEqual(versions, {"0.2.15"})
+        self.assertEqual(versions, {"0.2.16"})
         self.assertRegex(codex["version"], r"^\d+\.\d+\.\d+$")
 
     def test_skill_frontmatter_is_unique_and_matches_directory(self) -> None:
@@ -95,11 +95,17 @@ class PluginContractTests(unittest.TestCase):
             self.assertNotIn(name, names)
             names.add(name)
 
-    def test_hook_manifest_has_no_prompt_or_session_scans(self) -> None:
+    def test_hook_manifest_has_only_compaction_session_recovery(self) -> None:
         manifest = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
         hooks = manifest["hooks"]
-        self.assertEqual(set(hooks), {"PreToolUse", "PostToolUse", "Stop"})
-        self.assertNotIn("SessionStart", hooks)
+        self.assertEqual(set(hooks), {"SessionStart", "PreToolUse", "PostToolUse", "Stop"})
+        session_groups = hooks["SessionStart"]
+        self.assertEqual(len(session_groups), 1)
+        self.assertEqual(session_groups[0]["matcher"], "compact")
+        handlers = session_groups[0]["hooks"]
+        self.assertEqual(len(handlers), 1)
+        self.assertIn("lifecycle.py", handlers[0]["command"])
+        self.assertEqual(handlers[0]["additionalContextLimit"], 300)
         self.assertNotIn("UserPromptSubmit", hooks)
 
     def test_hook_manifest_uses_one_python_entrypoint_without_git_bash(self) -> None:
@@ -113,7 +119,7 @@ class PluginContractTests(unittest.TestCase):
         self.assertTrue(all("lifecycle.py" in command for command in commands))
         self.assertTrue(all("bash" not in command.casefold() for command in commands))
         self.assertTrue(all("run-hook.cmd" not in command for command in commands))
-        self.assertEqual(len(commands), 6)
+        self.assertEqual(len(commands), 8)
         self.assertIn("additionalContextLimit", manifest["hooks"]["PostToolUse"][0]["hooks"][0])
 
     def test_removed_entrypoints_cannot_be_migrated_into_duplicate_skills(self) -> None:
@@ -178,6 +184,22 @@ class LifecycleBehaviorTests(unittest.TestCase):
         }
         with mock.patch.object(self.module, "_repo_from_input", side_effect=AssertionError("不应访问仓库")):
             code, output = _invoke(self.module, payload)
+        self.assertEqual(code, 0)
+        self.assertEqual(output, "")
+
+    def test_compaction_injects_only_bounded_recovery_context(self) -> None:
+        payload = {"hook_event_name": "SessionStart", "source": "compact"}
+        with mock.patch.object(self.module, "_repo_from_input", side_effect=AssertionError("不应访问仓库")):
+            code, output = _invoke(self.module, payload)
+        context = json.loads(output)["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(code, 0)
+        self.assertIn("$jojo-code-guard", context)
+        self.assertNotIn("SKILL.md", context)
+        self.assertLessEqual(len(context.encode("utf-8")), 300)
+
+    def test_noncompact_session_start_is_silent(self) -> None:
+        payload = {"hook_event_name": "SessionStart", "source": "startup"}
+        code, output = _invoke(self.module, payload)
         self.assertEqual(code, 0)
         self.assertEqual(output, "")
 

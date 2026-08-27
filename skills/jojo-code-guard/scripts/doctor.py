@@ -180,6 +180,28 @@ def _hook_commands(manifest: dict[str, object], event: str) -> list[str]:
     return commands
 
 
+def _has_compact_recovery_hook(manifest: dict[str, object]) -> bool:
+    """确认 SessionStart 只在 compact 后发出短恢复提示。"""
+    hooks = manifest.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    groups = hooks.get("SessionStart")
+    if not isinstance(groups, list) or len(groups) != 1:
+        return False
+    group = groups[0]
+    if not isinstance(group, dict) or group.get("matcher") != "compact":
+        return False
+    handlers = group.get("hooks")
+    if not isinstance(handlers, list) or len(handlers) != 1 or not isinstance(handlers[0], dict):
+        return False
+    handler = handlers[0]
+    commands = [handler.get(key) for key in ("command", "commandWindows")]
+    return (
+        all(isinstance(command, str) and "lifecycle.py" in command for command in commands)
+        and handler.get("additionalContextLimit") == 300
+    )
+
+
 def _check_plugin(findings: list[Finding]) -> None:
     """校验最小插件清单与生命周期契约。"""
     root = _plugin_root()
@@ -198,16 +220,24 @@ def _check_plugin(findings: list[Finding]) -> None:
     if hooks is None:
         findings.append(Finding("BLOCKED", "插件", "Hook", f"无法读取 {hook_path}"))
         return
-    for obsolete in ("SessionStart", "UserPromptSubmit"):
-        configured = isinstance(hooks.get("hooks"), dict) and obsolete in hooks["hooks"]
-        findings.append(
-            Finding(
-                "BLOCKED" if configured else "OK",
-                "插件",
-                obsolete,
-                "不应注册；会造成重复加载或每条消息扫描" if configured else "未注册",
-            )
+    session_start_ok = _has_compact_recovery_hook(hooks)
+    findings.append(
+        Finding(
+            "OK" if session_start_ok else "BLOCKED",
+            "插件",
+            "SessionStart",
+            "只在 compact 后发送短恢复提示" if session_start_ok else "必须只匹配 compact 且使用 lifecycle.py",
         )
+    )
+    configured = isinstance(hooks.get("hooks"), dict) and "UserPromptSubmit" in hooks["hooks"]
+    findings.append(
+        Finding(
+            "BLOCKED" if configured else "OK",
+            "插件",
+            "UserPromptSubmit",
+            "不应注册；会造成每条消息扫描" if configured else "未注册",
+        )
+    )
     for event in ("PreToolUse", "PostToolUse", "Stop"):
         commands = _hook_commands(hooks, event)
         current = commands and all("lifecycle.py" in command for command in commands)

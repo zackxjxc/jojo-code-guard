@@ -60,6 +60,10 @@ READ_ONLY_COMMANDS = frozenset(
 READ_ONLY_GIT_SUBCOMMANDS = frozenset(
     {"diff", "log", "ls-files", "rev-parse", "show", "status"}
 )
+COMPACTION_RECOVERY_CONTEXT = (
+    "上下文已压缩。若继续处理本地文本文件，请在下一次文件操作前重新激活 "
+    "$jojo-code-guard；编码、BOM、换行和 diff 守护仍由生命周期 Hook 执行。"
+)
 
 
 def _configure_output() -> None:
@@ -88,6 +92,18 @@ def _event_payload(event: str, context: str, *, stop: bool = False) -> dict[str,
         "hookSpecificOutput": {
             "hookEventName": event,
             "additionalContext": context,
+        }
+    }
+
+
+def _compaction_payload(value: dict[str, object]) -> dict[str, object] | None:
+    """只在 compact 来源返回有界恢复提示，不读取文件或扫描仓库。"""
+    if value.get("source") != "compact":
+        return None
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": COMPACTION_RECOVERY_CONTEXT,
         }
     }
 
@@ -288,6 +304,11 @@ def main() -> int:
         event = value.get("hook_event_name")
         if not isinstance(event, str):
             raise RuntimeError("Hook 输入缺少 hook_event_name")
+        if event == "SessionStart":
+            payload = _compaction_payload(value)
+            if payload is not None:
+                print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+            return 0
         if event in {"PreToolUse", "PostToolUse"} and _confirmed_read_only(value):
             return 0
         directory = _state_directory(value)
