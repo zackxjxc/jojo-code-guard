@@ -80,6 +80,70 @@ def _print_text(repo: pathlib.Path, diagnostics: list[Diagnostic]) -> None:
     print("\n建议：先恢复本轮造成的污染，再用最小补丁重做；不要直接格式化整个文件。")
 
 
+def _has_candidate_changes(repo: pathlib.Path, staged_only: bool) -> bool:
+    """用一次轻量 Git 查询跳过干净工作区的完整检查。"""
+    if staged_only:
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=str(repo),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode in {0, 1}:
+            return result.returncode == 1
+    else:
+        result = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            cwd=str(repo),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode == 0:
+            return bool(result.stdout)
+    detail = result.stderr.decode("utf-8", errors="replace").strip()
+    raise RuntimeError("无法判断工作区是否需要检查" + (f"：{detail}" if detail else ""))
+
+
+def collect_diagnostics(
+    repo: pathlib.Path,
+    *,
+    staged_only: bool = False,
+    allow_initial_baseline: bool = False,
+    migration_allowances: dict[str, set[str]] | None = None,
+    skip_clean_check: bool = False,
+) -> list[Diagnostic]:
+    """收集工作区诊断；生命周期 Hook 可复用已完成的变化判断。"""
+    if not skip_clean_check and not _has_candidate_changes(repo, staged_only):
+        return []
+    allowances = migration_allowances or {}
+    diagnostics = check_changes(
+        repo,
+        staged=True,
+        allow_initial_baseline=allow_initial_baseline,
+        migration_allowances=allowances,
+    )
+    diagnostics.extend(check_conversion_policy(repo, staged=True))
+    diagnostics.extend(check_diff_size(repo, staged=True))
+    diagnostics.extend(check_filemode_changes(repo, staged=True))
+    diagnostics.extend(_whitespace_diagnostics(repo, staged=True))
+    if not staged_only:
+        diagnostics.extend(
+            check_changes(
+                repo,
+                staged=False,
+                allow_initial_baseline=allow_initial_baseline,
+                migration_allowances=allowances,
+            )
+        )
+        diagnostics.extend(check_conversion_policy(repo, staged=False))
+        diagnostics.extend(check_diff_size(repo, staged=False))
+        diagnostics.extend(check_filemode_changes(repo, staged=False))
+        diagnostics.extend(_whitespace_diagnostics(repo, staged=False))
+    return list(dict.fromkeys(diagnostics))
+
+
 def main(arguments: list[str] | None = None) -> int:
     """解析参数并检查工作区与暂存区。"""
     _configure_output()
@@ -119,29 +183,12 @@ def main(arguments: list[str] | None = None) -> int:
                 migration_allowances=migration_allowances,
             )
         else:
-            diagnostics = check_changes(
+            diagnostics = collect_diagnostics(
                 repo,
-                staged=True,
+                staged_only=options.staged_only,
                 allow_initial_baseline=options.allow_initial_baseline,
                 migration_allowances=migration_allowances,
             )
-            diagnostics.extend(check_conversion_policy(repo, staged=True))
-            diagnostics.extend(check_diff_size(repo, staged=True))
-            diagnostics.extend(check_filemode_changes(repo, staged=True))
-            diagnostics.extend(_whitespace_diagnostics(repo, staged=True))
-            if not options.staged_only:
-                diagnostics.extend(
-                    check_changes(
-                        repo,
-                        staged=False,
-                        allow_initial_baseline=options.allow_initial_baseline,
-                        migration_allowances=migration_allowances,
-                    )
-                )
-                diagnostics.extend(check_conversion_policy(repo, staged=False))
-                diagnostics.extend(check_diff_size(repo, staged=False))
-                diagnostics.extend(check_filemode_changes(repo, staged=False))
-                diagnostics.extend(_whitespace_diagnostics(repo, staged=False))
     except (RuntimeError, ValueError) as error:
         print(f"BLOCKED  {error}", file=sys.stderr)
         return 2

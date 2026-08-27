@@ -31,7 +31,7 @@ TEXT_SUFFIXES = {
 }
 TEXT_NAMES = {
     ".editorconfig", ".gitattributes", ".gitignore", ".gitmodules", "AGENTS.md", "CMakeLists.txt",
-    "Dockerfile", "Makefile", "post-write-check", "session-start",
+    "Dockerfile", "Makefile", "lifecycle.py",
 }
 # 常见二进制后缀不参与未知路径的文本推断，避免误报资源文件。
 BINARY_SUFFIXES = {

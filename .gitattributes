@@ -5,8 +5,7 @@
 .editorconfig text eol=lf
 .gitattributes text eol=lf
 .gitignore text eol=lf
-hooks/session-start text eol=lf
-hooks/post-write-check text eol=lf
+hooks/lifecycle.py text eol=lf
 *.png   binary
 *.jpg   binary
 *.gif   binary
