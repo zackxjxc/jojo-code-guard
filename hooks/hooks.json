@@ -1,6 +1,21 @@
 {
   "description": "只在可能写入的工具调用前后记录快照，并在真实变化时检查编码、换行和 diff。",
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/lifecycle.py\"",
+            "commandWindows": "py -3 -B \"%PLUGIN_ROOT%\\hooks\\lifecycle.py\"",
+            "timeout": 10,
+            "async": false,
+            "additionalContextLimit": 300
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "apply_patch|Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell",

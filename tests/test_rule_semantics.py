@@ -29,6 +29,20 @@ class PreservedNaturalLanguageTests(unittest.TestCase):
 
 
 class LeanSkillSemanticsTests(unittest.TestCase):
+    def test_upgrade_guide_covers_upgrade_migration_and_behavioral_checks(self) -> None:
+        content = (ROOT / "升级后验证指南.md").read_text(encoding="utf-8")
+        for required in (
+            "codex plugin marketplace upgrade jojo-code-guard",
+            "codex plugin add jojo-code-guard@jojo-code-guard",
+            "0.2.16",
+            "SessionStart",
+            "UserPromptSubmit",
+            "tests.test_claude_adapter",
+            "check_diff.py --repo . --tracked-revision HEAD",
+            "新会话行为烟测",
+        ):
+            self.assertIn(required, content)
+
     def test_main_skill_is_file_specific_and_has_no_all_task_bootstrap(self) -> None:
         content = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
         frontmatter = content.split("---", 2)[1]
@@ -44,6 +58,7 @@ class LeanSkillSemanticsTests(unittest.TestCase):
         self.assertIn("原生发现", content)
         self.assertIn("不再要求", content)
         self.assertIn("SessionStart", content)
+        self.assertIn("source: compact", content)
         self.assertIn("用户级旧版 jojo Hook 应移除", content)
 
     def test_file_guard_describes_pre_post_and_stateful_stop(self) -> None:
@@ -52,6 +67,7 @@ class LeanSkillSemanticsTests(unittest.TestCase):
         self.assertIn("工作区真实变化后才", content)
         self.assertIn("纯聊天", content)
         self.assertIn("不复制完整工具输出或待交付答案", content)
+        self.assertIn("上下文压缩", content)
         self.assertNotIn("`UserPromptSubmit` 记录回合基线", content)
 
     def test_usage_keeps_core_migration_and_encoding_contracts(self) -> None:

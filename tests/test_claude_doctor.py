@@ -51,7 +51,7 @@ class CoreDoctorTests(unittest.TestCase):
             self.assertNotIn(obsolete, source)
         self.assertFalse(hasattr(self.doctor, "_sync_global_rules"))
 
-    def test_hook_contract_requires_pre_post_stop_only(self) -> None:
+    def test_hook_contract_allows_compact_recovery_only(self) -> None:
         findings: list[object] = []
         self.doctor._check_plugin(findings)
         by_item = {item.item: item for item in findings}

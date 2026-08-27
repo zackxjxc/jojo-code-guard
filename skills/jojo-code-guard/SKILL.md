@@ -6,7 +6,8 @@ description: Preserve encoding, BOM, line endings, file type, and reviewable dif
 # 啾啾代码守护
 
 本 Skill 只补充 Codex 原生文件编辑能力没有机械保证的字节级约束。项目规则由客户端原生发现；不要通过
-`SessionStart`、全局 `AGENTS.md` 或其他包装在每个回复前重复读取本文件。
+`SessionStart`、全局 `AGENTS.md` 或其他包装在每个回复前重复读取本文件。上下文压缩后，插件只发送一条
+短恢复提示；它不读取或注入本文件正文。
 
 ## 核心约束
 
