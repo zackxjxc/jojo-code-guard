@@ -2,6 +2,17 @@
 
 本文件记录 jojo-code-guard 的重要变更。
 
+## [Unreleased]
+
+- 改用客户端原生 Skill 与 `AGENTS.md` 发现，不再由 SessionStart 注入加载指令或要求每个回复重读规则。
+- 删除 UserPromptSubmit 全量扫描；PreToolUse 只记录轻量快照，PostToolUse 仅在真实变化后完整检查，Stop 只兜底本轮写入状态。
+- 生命周期入口合并为单个跨平台 Python 脚本，移除 Git Bash、Windows 批处理和多次 Python JSON 解析链。
+- Hook 反馈不再复制 `last_assistant_message`，并限制模型可见诊断数量，避免相同结果重复占用上下文。
+- 删除会被 Codex 迁移成重复 Skills 的 Claude commands 与 help Skill，正式入口收敛为主守护、doctor 和 check-diff。
+- doctor 收敛到 Python/Git、仓库规则、生命周期 Hook、可选 pre-commit 和旧版重复配置诊断；移除联网更新、设备工具安装、全局规则写入和客户端缓存哈希。
+- 删除两套高度重复的插件目录事务同步器，插件安装与升级交由客户端原生 marketplace 管理。
+- 新增纯聊天零仓库访问、只读命令零检查、真实写入单次检查、Stop 不复制答案、并行工具状态隔离和未改专项规则字节保持测试。
+
 ## [0.2.13] - 2026-08-11
 
 - 修复 Git 特殊路径、Unicode 重命名、大文件读取和 staged-only 批处理误扫，并增加精确单文件迁移许可。
