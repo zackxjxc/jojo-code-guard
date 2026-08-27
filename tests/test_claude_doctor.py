@@ -19,6 +19,11 @@ DOCTOR_PATH = SCRIPT_ROOT / "doctor.py"
 sys.path.insert(0, str(SCRIPT_ROOT))
 
 
+def _write_text(path: pathlib.Path, content: str) -> None:
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(content)
+
+
 def _load_doctor():
     """独立加载 doctor，避免测试间共享参数状态。"""
     spec = importlib.util.spec_from_file_location("jojo_doctor_under_test", DOCTOR_PATH)
@@ -36,7 +41,7 @@ def _init_repo(path: pathlib.Path) -> None:
     subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
-    (path / "tracked.txt").write_text("tracked\n", encoding="utf-8", newline="\n")
+    _write_text(path / "tracked.txt", "tracked\n")
     subprocess.run(["git", "add", "tracked.txt"], cwd=path, check=True)
     subprocess.run(["git", "commit", "-qm", "initial"], cwd=path, check=True)
 
@@ -66,20 +71,18 @@ class CoreDoctorTests(unittest.TestCase):
             agents = root / "AGENTS.md"
             hook = root / "session-start"
             config = root / "hooks.json"
-            agents.write_text(
+            _write_text(
+                agents,
                 "# 用户规则\n\n## jojo-code-guard 自动加载（必须严格遵守）\n\n旧规则\n",
-                encoding="utf-8",
-                newline="\n",
             )
-            hook.write_text("# jojo-code-guard\nJOJO_CODE_GUARD=1\n", encoding="utf-8", newline="\n")
-            config.write_text(
+            _write_text(hook, "# jojo-code-guard\nJOJO_CODE_GUARD=1\n")
+            _write_text(
+                config,
                 json.dumps(
                     {"hooks": {"SessionStart": [{"command": r"C:\Users\test\.codex\hooks\session-start"}]}},
                     ensure_ascii=False,
                 )
                 + "\n",
-                encoding="utf-8",
-                newline="\n",
             )
             before = {path: path.read_bytes() for path in (agents, hook, config)}
             findings: list[object] = []
