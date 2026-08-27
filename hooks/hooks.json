@@ -1,27 +1,15 @@
 {
+  "description": "只在可能写入的工具调用前后记录快照，并在真实变化时检查编码、换行和 diff。",
   "hooks": {
-    "SessionStart": [
+    "PreToolUse": [
       {
-        "matcher": "startup|resume|clear|compact|fork",
+        "matcher": "apply_patch|Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell",
         "hooks": [
           {
             "type": "command",
-            "command": "bash --norc --noprofile \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/session-start\"",
-            "commandWindows": "call \"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" session-start",
-            "timeout": 10,
-            "async": false
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash --norc --noprofile \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/post-write-check\"",
-            "commandWindows": "call \"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" post-write-check",
-            "timeout": 60,
+            "command": "python3 -B \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/lifecycle.py\"",
+            "commandWindows": "py -3 -B \"%PLUGIN_ROOT%\\hooks\\lifecycle.py\"",
+            "timeout": 30,
             "async": false
           }
         ]
@@ -33,10 +21,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash --norc --noprofile \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/post-write-check\"",
-            "commandWindows": "call \"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" post-write-check",
+            "command": "python3 -B \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/lifecycle.py\"",
+            "commandWindows": "py -3 -B \"%PLUGIN_ROOT%\\hooks\\lifecycle.py\"",
             "timeout": 60,
-            "async": false
+            "async": false,
+            "additionalContextLimit": 1200
           }
         ]
       }
@@ -46,8 +35,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash --norc --noprofile \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/post-write-check\"",
-            "commandWindows": "call \"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" post-write-check",
+            "command": "python3 -B \"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/lifecycle.py\"",
+            "commandWindows": "py -3 -B \"%PLUGIN_ROOT%\\hooks\\lifecycle.py\"",
             "timeout": 60,
             "async": false
           }
